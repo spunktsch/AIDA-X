@@ -148,6 +148,13 @@ add_custom_command(
 add_custom_target(AIDA-X-App ALL
   DEPENDS "${CMAKE_BINARY_DIR}/bin/AIDA-X.app/Contents/Resources/ax.icns"
 )
+add_custom_command(
+  TARGET AIDA-X-au POST_BUILD
+  COMMAND cmake -E copy "${CMAKE_SOURCE_DIR}/utils/Info.plist" "${CMAKE_BINARY_DIR}/bin/AIDA-X.component/Contents/Info.plist"
+  COMMENT "Copying AU bundle Info.plist"
+  DEPENDS AIDA-X-export
+  OUTPUT "${CMAKE_BINARY_DIR}/bin/AIDA-X.component/Contents/Info.plist"
+)
 elseif(WIN32)
 target_sources(AIDA-X-Standalone-jack PUBLIC utils/ax.rc)
 endif()
