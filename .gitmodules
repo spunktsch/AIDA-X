@@ -22,3 +22,9 @@
 [submodule "modules/dpf-widgets"]
 	path = modules/dpf-widgets
 	url = https://github.com/DISTRHO/DPF-Widgets.git
+[submodule "modules/wgpu-native"]
+	path = modules/wgpu-native
+	url = https://github.com/gfx-rs/wgpu-native.git
+[submodule "modules/egui"]
+	path = modules/egui
+	url = https://github.com/emilk/egui.git

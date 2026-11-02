@@ -152,6 +152,105 @@ elseif(WIN32)
 target_sources(AIDA-X-Standalone-jack PUBLIC utils/ax.rc)
 endif()
 
+# ============================================================================
+# WGPU+egui Standalone Backend (TICKET-006)
+# ============================================================================
+
+option(WITH_WGPU_EGUI "Build WGPU+egui standalone backend" OFF)
+
+if(WITH_WGPU_EGUI)
+    find_package(Threads REQUIRED)
+
+    # Find wgpu-native library
+    set(WGPU_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/modules/wgpu-native/ffi" CACHE PATH "wgpu-native include directory")
+    set(WGPU_HEADERS_DIR "${CMAKE_SOURCE_DIR}/modules/wgpu-native/ffi/webgpu-headers" CACHE PATH "webgpu headers directory")
+
+    # Find GLFW
+    find_package(glfw3 QUIET)
+    if(NOT glfw3_FOUND)
+        # Try to find GLFW via pkg-config
+        find_package(PkgConfig QUIET)
+        if(PKG_CONFIG_FOUND)
+            pkg_check_modules(GLFW REQUIRED glfw3)
+        endif()
+    endif()
+
+    add_executable(AIDA-X-WGPU
+        src/wgpu-egui/main.cpp
+        src/wgpu-egui/WgpuBackend.cpp
+        src/wgpu-egui/Gui.cpp
+    )
+
+    target_include_directories(AIDA-X-WGPU PRIVATE
+        src
+        src/wgpu-egui
+        src/plugin
+        modules/rtneural
+        modules/wgpu-native/ffi
+        modules/wgpu-native/ffi/webgpu-headers
+        modules/FFTConvolver
+        modules/r8brain
+        modules/dpf/distrho
+        ${CMAKE_BINARY_DIR}
+    )
+
+    if(WIN32)
+        target_link_libraries(AIDA-X-WGPU PRIVATE
+            ${WGPU_LIBRARY}
+            ${GLFW_LIBRARY}
+            d3dcompiler
+            ws2_32
+            userenv
+            bcrypt
+            ntdll
+            opengl32
+            Propsys
+            RuntimeObject
+        )
+        target_compile_definitions(AIDA-X-WGPU PRIVATE
+            _WIN32_WINNT=0x0A00
+            WIN32_LEAN_AND_MEAN
+        )
+    elseif(APPLE)
+        target_link_libraries(AIDA-X-WGPU PRIVATE
+            ${WGPU_LIBRARY}
+            ${GLFW_LIBRARY}
+            "-framework Cocoa"
+            "-framework IOKit"
+            "-framework CoreFoundation"
+            "-framework QuartzCore"
+            "-framework Metal"
+        )
+    else()
+        target_link_libraries(AIDA-X-WGPU PRIVATE
+            ${WGPU_LIBRARY}
+            ${GLFW_LIBRARY}
+            "-lm"
+            "-ldl"
+            "-lpthread"
+        )
+        if(UNIX)
+            target_link_libraries(AIDA-X-WGPU PRIVATE X11)
+        endif()
+    endif()
+
+    target_compile_features(AIDA-X-WGPU PRIVATE cxx_std_17)
+
+    # Link wgpu-native library
+    if(WGPU_LIBRARY)
+        target_link_libraries(AIDA-X-WGPU PRIVATE ${WGPU_LIBRARY})
+    endif()
+
+    set_target_properties(AIDA-X-WGPU PROPERTIES
+        OUTPUT_NAME "AIDA-X-WGPU"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+
+    message(STATUS "WGPU+egui standalone backend enabled")
+    message(STATUS "  Binary: AIDA-X-WGPU")
+    message(STATUS "  WGPU include: ${WGPU_INCLUDE_DIR}")
+endif()
+
 # set up windows installer
 if(WIN32 AND MINGW)
 add_custom_command(
