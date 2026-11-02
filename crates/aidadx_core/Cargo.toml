@@ -1,0 +1,23 @@
+[package]
+name = "aidadx_core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rustfft = { version = "6", optional = true }
+crossbeam = "0.8"
+rtrb = "0.3"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+simd = ["rustfft"]
+candle = ["candle-core", "candle-nn"]
