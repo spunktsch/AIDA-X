@@ -1,10 +1,10 @@
 ---
 id: TICKET-001
-status: active
+status: done
 assignee:
 priority: critical
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Set up Rust Cargo workspace with aidadx_core crate
@@ -24,3 +24,6 @@ Initialize the Rust monorepo structure. The workspace root Cargo.toml and the fi
 - `rustfft` for SIMD-accelerated FFT
 - `cpal` for cross-platform audio I/O
 - `crossbeam` for RT-safe channels between audio thread and UI thread
+
+## Audit 2026-11-07
+Superseded by consolidation commit 1a58a36 on `integration/rust-core` (workspace on `crates/` layout). Original branch `ticket-001-rust-workspace` used a root-level `aidadx_*/` layout with stub modules only; not merged.

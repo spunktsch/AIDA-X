@@ -1,10 +1,10 @@
 ---
 id: TICKET-005
-status: active
+status: backlog
 assignee:
 priority: high
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement full audio processing pipeline and parameter system
@@ -28,3 +28,6 @@ Wire together biquad, convolver, and neural model into a single processing graph
 - Bypass uses `bypassGain` exponential smoother with 0.25s time constant
 - Meter uses peak detection at 60fps (16.667ms frames at 44.1kHz = ~736 samples)
 - MOD_BUILD conditional compiles must be handled (web variant)
+
+## Audit 2026-11-07
+Branch `ticket-005-audio-pipeline` (commit acadde0) changes the **C++/DPF** code (refactor of src/aidadsp-plugin.cpp) instead of the Rust crates required by docs/PRD.md. Not integrated; branch kept for reference. Acceptance criteria reset — must be re-implemented in Rust.

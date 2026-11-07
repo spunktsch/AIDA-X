@@ -1,10 +1,10 @@
 ---
 id: TICKET-011
-status: active
+status: backlog
 assignee:
 priority: high
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement iOS AUv3 plugin wrapper and standalone app
@@ -28,3 +28,6 @@ Create the iOS deployment targets: an AUv3 plugin for use in hosts like Cubasis/
 - AUv3 requires `AudioComponent` registration in Info.plist
 - Metal acceleration via `candle/metal` feature flag for GPU inference
 - Current `Info.plist` from C++ project must be ported to Xcode project
+
+## Audit 2026-11-07
+Worktree `ticket-011-ios-auv3` was created but contains no work. Blocked on aidadx_core pipeline + aidadx_plugin.

@@ -1,10 +1,10 @@
 ---
 id: TICKET-010
-status: active
+status: backlog
 assignee:
 priority: high
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement cross-platform standalone application
@@ -28,3 +28,6 @@ Build a standalone AIDA-X desktop application with embedded UI window, audio dev
 - `cpal` for audio device enumeration and streaming
 - `egui-native` file dialog integration or native `rfd` crate
 - macOS: requires app bundle with Info.plist and correct entitlements for audio input
+
+## Audit 2026-11-07
+Work in worktree `ticket-010-standalone-app` is **uncommitted**: `standalone/` crate (Rust egui/eframe + cpal + rfd UI) calling a C++ DSP engine (`standalone/src/dsp/engine.cpp`) over C FFI, plus edits to CMakeLists.txt, build.yml, src/DistrhoPluginCommon.hpp. Never produced a binary. A duplicate of this ticket in `.kilo/tickets/` had all boxes checked — that was not accurate and was removed. Hybrid C++ engine conflicts with PRD; re-implement on `aidadx_core` once pipeline (TICKET-005) exists.
