@@ -9,33 +9,50 @@
 //!        └────────────────── dry copy ─────────────────┘
 //! ```
 //!
-//! The neural model and cabinet IR stages are currently **pass-through TODO hooks**
-//! (see [`AidaEngine::apply_model`] and [`AidaEngine::apply_cabinet`]).
+//! The neural model ([`DynamicModel`], RTNeural backend) and the cabinet convolver
+//! ([`TwoStageConvolver`]) are built off the audio thread (see [`crate::loader`]) and handed
+//! over through lock-free [`Handoff`] slots ([`AidaEngine::model_slot`],
+//! [`AidaEngine::cabinet_slot`]). [`AidaEngine::process`] never allocates or frees.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use aidadx_core::biquad::{
     db_to_coeff, map, Biquad, BiquadType, ExponentialValueSmoother, GainRamp, LinearValueSmoother,
     ValueSmoother,
 };
+use aidadx_core::convolver::TwoStageConvolver;
+use aidadx_core::model::DynamicModel;
 use nih_plug::prelude::AtomicF32;
 
+use crate::handoff::Handoff;
 use crate::parameters::{EqPosition, MidType, ParamSnapshot};
 
-/// Q used by all fixed-Q tone filters (`COMMON_Q`).
-const COMMON_Q: f64 = 0.707;
+// The C++ constants are `float`s handed to `double` APIs, so they are rounded through
+// `f32` here, exactly like `aidadx_core::biquad` does internally (its copies are private).
+
+/// Q used by all fixed-Q tone filters (`COMMON_Q = 0.707f`).
+const COMMON_Q: f64 = 0.707_f32 as f64;
 /// Fixed centre frequency of the DEPTH peak filter (`DEPTH_FREQ`).
 const DEPTH_FREQ: f64 = 75.0;
 /// Fixed corner frequency of the PRESENCE high shelf (`PRESENCE_FREQ`).
 const PRESENCE_FREQ: f64 = 900.0;
-/// DC blocker high-pass corner, in Hz.
+/// DC blocker high-pass corner, in Hz (`35.0f`).
 const DC_BLOCKER_FREQ: f64 = 35.0;
-/// Anti-aliasing LPF normalized cutoff at ANTIALIASING = 0 % (`INLPF_MAX_CO`).
-const INLPF_MAX_CO: f64 = 0.99 * 0.5;
-/// Anti-aliasing LPF normalized cutoff at ANTIALIASING = 100 % (`INLPF_MIN_CO`).
-const INLPF_MIN_CO: f64 = 0.25 * 0.5;
-/// Gain compensation for the cabinet IR, -12 dB (`kCabinetMaxGain`).
-pub const CABINET_MAX_GAIN: f64 = 0.251;
+/// Anti-aliasing LPF normalized cutoff at ANTIALIASING = 0 % (`0.99f * 0.5f`).
+const INLPF_MAX_CO: f64 = (0.99_f32 * 0.5) as f64;
+/// Anti-aliasing LPF normalized cutoff at ANTIALIASING = 100 % (`0.25f * 0.5f`).
+const INLPF_MIN_CO: f64 = (0.25_f32 * 0.5) as f64;
+/// Gain compensation for the cabinet IR, -12 dB (`kCabinetMaxGain = 0.251f`), as used in
+/// the per-sample `float` crossfade.
+pub const CABINET_MAX_GAIN_F32: f32 = 0.251;
+/// [`CABINET_MAX_GAIN_F32`] widened for the `f64` smoother API.
+pub const CABINET_MAX_GAIN: f64 = CABINET_MAX_GAIN_F32 as f64;
+
+/// Lock-free slot the loader publishes new (reset + pre-warmed) models into.
+pub type ModelSlot = Handoff<DynamicModel>;
+/// Lock-free slot the loader publishes new cabinet convolvers into.
+pub type CabinetSlot = Handoff<TwoStageConvolver>;
 /// Meter floor in dB (`kMinimumMeterDb`).
 pub const MINIMUM_METER_DB: f64 = -60.0;
 
@@ -87,6 +104,17 @@ pub struct AidaEngine {
 
     /// Copy of the unprocessed input (`bypassInplaceBuffer`).
     dry: Vec<f32>,
+    /// Convolver input copy (`cabsimInplaceBuffer`).
+    cab_in: Vec<f32>,
+
+    /// Active neural model (`model`), owned by the audio thread.
+    model: Option<Box<DynamicModel>>,
+    model_slot: Arc<ModelSlot>,
+    /// `paramFirstRun`: jump PARAM1/PARAM2 smoothers to their targets on the next block.
+    param_first_run: bool,
+    /// Active cabinet convolver (`cabsim`), owned by the audio thread.
+    cabinet: Option<Box<TwoStageConvolver>>,
+    cabinet_slot: Arc<CabinetSlot>,
 
     tmp_meter_in: f32,
     tmp_meter_out: f32,
@@ -113,6 +141,12 @@ impl AidaEngine {
             param1: LinearValueSmoother::with_time_constant(0.1),
             param2: LinearValueSmoother::with_time_constant(0.1),
             dry: Vec::new(),
+            cab_in: Vec::new(),
+            model: None,
+            model_slot: Arc::new(ModelSlot::new()),
+            param_first_run: true,
+            cabinet: None,
+            cabinet_slot: Arc::new(CabinetSlot::new()),
             tmp_meter_in: 0.0,
             tmp_meter_out: 0.0,
             tmp_meter_frames: 0,
@@ -130,6 +164,7 @@ impl AidaEngine {
     pub fn prepare(&mut self, sample_rate: f64, max_block_size: usize, params: &ParamSnapshot) {
         self.sample_rate = sample_rate;
         self.dry.resize(max_block_size.max(1), 0.0);
+        self.cab_in.resize(max_block_size.max(1), 0.0);
         self.params = *params;
         let p = *params;
         let sr = sample_rate;
@@ -196,7 +231,43 @@ impl AidaEngine {
         self.reset();
     }
 
-    /// `activate()`: jump all smoothers to their targets, clear filter state and meters.
+    /// Slot through which a loader hands new models to this engine.
+    pub fn model_slot(&self) -> Arc<ModelSlot> {
+        self.model_slot.clone()
+    }
+
+    /// Slot through which a loader hands new cabinet convolvers to this engine.
+    pub fn cabinet_slot(&self) -> Arc<CabinetSlot> {
+        self.cabinet_slot.clone()
+    }
+
+    /// The active model, if any.
+    pub fn model(&self) -> Option<&DynamicModel> {
+        self.model.as_deref()
+    }
+
+    /// The active cabinet convolver, if any.
+    pub fn cabinet(&self) -> Option<&TwoStageConvolver> {
+        self.cabinet.as_deref()
+    }
+
+    /// Install models/convolvers published by the loader. Real-time safe: the replaced
+    /// objects are parked for the loader thread to free (see [`Handoff`]).
+    fn take_pending(&mut self, outputs: &PluginOutputs) {
+        if self.model_slot.take(&mut self.model) {
+            // The loader already reset and pre-warmed the model with the PARAM1/PARAM2
+            // targets (`loadModelFromStream`); jump the smoothers like C++ does.
+            self.param_first_run = true;
+        }
+        self.cabinet_slot.take(&mut self.cabinet);
+        // `kParameterModelInputSize`: 0 ("ERROR") until a model is loaded.
+        let size = self.model.as_ref().map_or(0, |m| m.input_size() as u32);
+        outputs.model_input_size.store(size, Ordering::Relaxed);
+    }
+
+    /// `activate()`: jump all smoothers to their targets, clear filter state and meters,
+    /// reset the model and pre-roll 2048 samples of silence through it.
+    /// Real-time safe (nih-plug may call it from the audio thread).
     pub fn reset(&mut self) {
         self.in_level.clear_to_target();
         self.out_level.clear_to_target();
@@ -218,8 +289,15 @@ impl AidaEngine {
         self.tmp_meter_frames = 0;
         self.tmp_meter_in = 0.0;
         self.tmp_meter_out = 0.0;
-        // TODO(model): reset the model's recurrent state and pre-roll 2048 samples of
-        // silence through it, as `activate()` does in C++.
+        if let Some(model) = self.model.as_deref_mut() {
+            // `prewarm` = reset + 2048 zeros (stack buffer). It only fails on the candle
+            // backend, where a skipped pre-roll is harmless.
+            let _ = model.prewarm(
+                self.param1.target_value() as f32,
+                self.param2.target_value() as f32,
+            );
+        }
+        self.param_first_run = false;
     }
 
     /// `setParameterValue()` for every parameter whose value differs from the last
@@ -296,6 +374,7 @@ impl AidaEngine {
 
     /// Process one mono block in place. Blocks longer than the prepared maximum are split.
     pub fn process(&mut self, buffer: &mut [f32], outputs: &PluginOutputs) {
+        self.take_pending(outputs);
         let chunk = self.dry.len();
         for block in buffer.chunks_mut(chunk) {
             self.process_block(block, outputs);
@@ -339,7 +418,7 @@ impl AidaEngine {
         }
 
         if !p.net_bypass {
-            self.apply_model(out, outputs);
+            self.apply_model(out);
         }
 
         if p.dc_blocker {
@@ -387,24 +466,58 @@ impl AidaEngine {
         }
     }
 
-    /// Neural model stage (`applyModel()`). **Currently pass-through.**
-    ///
-    /// TODO(model): once `aidadx_core::model` inference builds (feature `candle`), hold a
-    /// loaded model here and run it per sample: apply `input_gain`, feed `[x]`,
-    /// `[x, param1.next()]` or `[x, param1.next(), param2.next()]` depending on the
-    /// model's input size, honour `input_skip` (residual) and `output_gain`, and publish
-    /// the input size to `outputs.model_input_size`. Model swaps must not block or
-    /// allocate on the audio thread.
-    fn apply_model(&mut self, _buf: &mut [f32], _outputs: &PluginOutputs) {}
+    /// Neural model stage (`applyModel()`). Input gain, `input_skip` and output gain are
+    /// handled by [`DynamicModel::process`]. PARAM1/PARAM2 are fed per sample to 2- and
+    /// 3-input models, and each smoother only advances if the model consumes it, as in
+    /// C++. While the consumed smoothers are settled the whole block runs with constant
+    /// conditioning, which is identical to the per-sample loop but avoids per-sample FFI.
+    fn apply_model(&mut self, buf: &mut [f32]) {
+        let Some(model) = self.model.as_deref_mut() else {
+            return;
+        };
+        if self.param_first_run {
+            self.param_first_run = false;
+            self.param1.clear_to_target_value();
+            self.param2.clear_to_target_value();
+        }
+        let input_size = model.input_size();
+        let settled = |s: &LinearValueSmoother| s.current_value() == s.target_value();
+        let ramping = (input_size >= 2 && !settled(&self.param1))
+            || (input_size >= 3 && !settled(&self.param2));
+        // `process` only fails on the candle backend (never with RTNeural).
+        if !ramping {
+            let p1 = self.param1.target_value() as f32;
+            let p2 = self.param2.target_value() as f32;
+            let _ = model.process(buf, p1, p2);
+        } else {
+            for i in 0..buf.len() {
+                let p1 = self.param1.next_f32();
+                let p2 = if input_size >= 3 {
+                    self.param2.next_f32()
+                } else {
+                    0.0
+                };
+                let _ = model.process(&mut buf[i..i + 1], p1, p2);
+            }
+        }
+    }
 
-    /// Cabinet IR stage. **Currently pass-through.**
-    ///
-    /// TODO(convolver): once a convolver exists in `aidadx_core`, when an IR is loaded:
-    /// copy `buf` to a scratch buffer `wet_in`, convolve `wet_in` into `buf`, then for each
-    /// sample `b = cabsim_gain.next(); buf[i] = buf[i] * b + wet_in[i] * ((CABINET_MAX_GAIN - b) / CABINET_MAX_GAIN)`
-    /// (smooth CABSIMBYPASS with -12 dB compensation). IRs must be resampled to the host
-    /// rate and reloaded on sample-rate change.
-    fn apply_cabinet(&mut self, _buf: &mut [f32]) {}
+    /// Cabinet IR stage: convolve, then the smooth CABSIMBYPASS crossfade with -12 dB
+    /// compensation, `out = wet * b + dry * ((kCabinetMaxGain - b) / kCabinetMaxGain)`
+    /// (`b` = 0.251 when enabled, 0 when bypassed). Skipped entirely (smoother not
+    /// advanced) while no IR is loaded, like C++.
+    fn apply_cabinet(&mut self, buf: &mut [f32]) {
+        let Some(cabinet) = self.cabinet.as_deref_mut() else {
+            return;
+        };
+        let dry = &mut self.cab_in[..buf.len()];
+        dry.copy_from_slice(buf);
+        cabinet.process(dry, buf);
+        for (s, d) in buf.iter_mut().zip(dry.iter()) {
+            let b = self.cabsim_gain.next_f32();
+            *s = *s * b + *d * ((CABINET_MAX_GAIN_F32 - b) / CABINET_MAX_GAIN_F32);
+        }
+    }
 }
 
 impl Default for AidaEngine {
@@ -570,5 +683,202 @@ mod tests {
         e.process(&mut silent, &out);
         let floor = db_to_coeff(MINIMUM_METER_DB) as f32;
         assert_eq!(out.meter_in.load(Ordering::Relaxed), floor);
+    }
+
+    // ---- model and cabinet stages (TICKET-017) ----
+
+    use crate::loader::{load_cabinet, load_model, FileSource};
+    use crate::test_models::lstm_json;
+
+    fn default_model() -> DynamicModel {
+        let mut m = load_model(&FileSource::Default).unwrap();
+        m.prewarm(0.0, 0.0).unwrap();
+        m
+    }
+
+    fn noise(len: usize) -> Vec<f32> {
+        let mut x = 1u32;
+        (0..len)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_model_reports_error_input_size() {
+        let (mut e, out) = engine(&transparent());
+        out.model_input_size.store(99, Ordering::Relaxed);
+        e.process(&mut [0.0; 64], &out);
+        assert_eq!(out.model_input_size.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn model_stage_matches_dynamic_model_and_net_bypass_skips_it() {
+        let input = sine(220.0, 3000);
+
+        let (mut e, out) = engine(&transparent());
+        e.model_slot().publish(Box::new(default_model()));
+        let mut buf = input.clone();
+        e.process(&mut buf, &out);
+        assert_eq!(out.model_input_size.load(Ordering::Relaxed), 1);
+        assert!(e.model().is_some());
+
+        let mut expected = input.clone();
+        let mut reference = default_model();
+        for chunk in expected.chunks_mut(BLOCK) {
+            reference.process(chunk, 0.0, 0.0).unwrap();
+        }
+        assert_eq!(buf, expected, "engine must run the model exactly like applyModel");
+        assert!(rms(&buf) > 0.01 && buf != input, "model changes the signal");
+
+        let p = ParamSnapshot {
+            net_bypass: true,
+            ..transparent()
+        };
+        e.set_params(&p);
+        let mut buf = input.clone();
+        e.process(&mut buf, &out);
+        assert_eq!(buf, input, "NETBYPASS skips the model");
+        assert_eq!(out.model_input_size.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn conditioned_model_follows_param1_and_param2() {
+        let json = lstm_json(3, 8, 7);
+        let run = |p1: f32, p2: f32| {
+            let p = ParamSnapshot {
+                param1: p1,
+                param2: p2,
+                ..transparent()
+            };
+            let (mut e, out) = engine(&p);
+            let mut m = DynamicModel::from_json(&json).unwrap();
+            m.prewarm(p1, p2).unwrap();
+            e.model_slot().publish(Box::new(m));
+            let mut buf = sine(330.0, 2048);
+            e.process(&mut buf, &out);
+            assert_eq!(out.model_input_size.load(Ordering::Relaxed), 3);
+            buf
+        };
+        let base = run(0.0, 0.0);
+        assert_ne!(base, run(1.0, 0.0), "PARAM1 conditions the model");
+        assert_ne!(base, run(0.0, 1.0), "PARAM2 conditions the model");
+
+        // Settled smoothers: whole-block processing equals a direct call.
+        let mut m = DynamicModel::from_json(&json).unwrap();
+        m.prewarm(0.5, 0.25).unwrap();
+        let mut expected = sine(330.0, 2048);
+        for chunk in expected.chunks_mut(BLOCK) {
+            m.process(chunk, 0.5, 0.25).unwrap();
+        }
+        assert_eq!(run(0.5, 0.25), expected);
+    }
+
+    #[test]
+    fn param_change_ramps_per_sample() {
+        let json = lstm_json(2, 8, 3);
+        let (mut e, out) = engine(&transparent());
+        let mut m = DynamicModel::from_json(&json).unwrap();
+        m.prewarm(0.0, 0.0).unwrap();
+        e.model_slot().publish(Box::new(m));
+        let mut warm = sine(100.0, 4096);
+        e.process(&mut warm, &out);
+
+        // Jump PARAM1 0 -> 1: the 100 ms linear ramp must reach the model sample by sample.
+        e.set_params(&ParamSnapshot {
+            param1: 1.0,
+            ..transparent()
+        });
+        let mut ramp = vec![0.0f32; 512];
+        e.process(&mut ramp, &out);
+        assert!(e.param1.current_value() > 0.0 && e.param1.current_value() < 1.0);
+
+        // Reference: per-sample conditioning with the same smoother.
+        let mut m = DynamicModel::from_json(&json).unwrap();
+        m.prewarm(0.0, 0.0).unwrap();
+        let mut w = sine(100.0, 4096);
+        m.process(&mut w, 0.0, 0.0).unwrap();
+        let mut s = LinearValueSmoother::with_time_constant(0.1);
+        s.set_sample_rate(SR);
+        s.set_target_value(1.0);
+        let mut expected = vec![0.0f32; 512];
+        for x in expected.iter_mut() {
+            m.process(std::slice::from_mut(x), s.next_f32(), 0.0).unwrap();
+        }
+        assert_eq!(ramp, expected);
+    }
+
+    #[test]
+    fn reset_prewarms_the_model() {
+        let (mut e, out) = engine(&transparent());
+        e.model_slot().publish(Box::new(default_model()));
+        let mut buf = noise(4096);
+        e.process(&mut buf, &out);
+        e.reset();
+        let mut silence = vec![0.0f32; 256];
+        e.process(&mut silence, &out);
+
+        let mut expected = vec![0.0f32; 256];
+        default_model().process(&mut expected, 0.0, 0.0).unwrap();
+        assert_eq!(silence, expected, "reset + 2048-sample pre-roll like activate()");
+    }
+
+    #[test]
+    fn cabinet_stage_applies_ir_with_compensated_crossfade() {
+        let input = noise(SR as usize);
+
+        // CABSIMBYPASS on from the start: b = 0 -> exactly the dry signal.
+        let bypassed = ParamSnapshot {
+            cabsim_bypass: true,
+            ..transparent()
+        };
+        let (mut e, out) = engine(&bypassed);
+        e.cabinet_slot()
+            .publish(Box::new(load_cabinet(&FileSource::Default, SR).unwrap()));
+        let mut buf = input.clone();
+        e.process(&mut buf, &out);
+        assert!(e.cabinet().is_some());
+        assert_eq!(buf, input, "bypassed cabinet is bit-transparent");
+
+        // Enabled: out = conv(x) * 0.251.
+        let (mut e, out) = engine(&transparent());
+        e.cabinet_slot()
+            .publish(Box::new(load_cabinet(&FileSource::Default, SR).unwrap()));
+        let mut buf = input.clone();
+        e.process(&mut buf, &out);
+        let mut conv = load_cabinet(&FileSource::Default, SR).unwrap();
+        let mut wet = vec![0.0f32; input.len()];
+        for (i, o) in input.chunks(BLOCK).zip(wet.chunks_mut(BLOCK)) {
+            conv.process(i, o);
+        }
+        for (a, w) in buf.iter().zip(&wet) {
+            assert!((a - w * CABINET_MAX_GAIN_F32).abs() < 1e-6, "{a} vs {w}");
+        }
+
+        // Toggle CABSIMBYPASS on a slow sine: smooth crossfade, no step.
+        let low = sine(50.0, SR as usize);
+        let (mut e, out) = engine(&transparent());
+        e.cabinet_slot()
+            .publish(Box::new(load_cabinet(&FileSource::Default, SR).unwrap()));
+        let mut a = low[..24_000].to_vec();
+        e.process(&mut a, &out);
+        e.set_params(&bypassed);
+        let mut b = low[24_000..].to_vec();
+        e.process(&mut b, &out);
+        let joined: Vec<f32> = a.iter().chain(&b).copied().collect();
+        let max_step = joined
+            .windows(2)
+            .skip(4096)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_step < 0.01, "crossfade step {max_step}");
+        // ...and it ends up at the dry signal (exponential, T60 = 100 ms).
+        let tail = &b[b.len() - 100..];
+        let dry = &low[low.len() - 100..];
+        for (x, d) in tail.iter().zip(dry) {
+            assert!((x - d).abs() < 1e-4);
+        }
     }
 }
