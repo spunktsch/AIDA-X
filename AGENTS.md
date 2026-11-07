@@ -135,7 +135,7 @@ agent_manager(
     mode="worktree",
     tasks=[{
         "name": "TICKET-003: iOS AUv3",
-        "prompt": "Implement the AUv3 plugin wrapper. See tickets/active/TICKET-003.md for acceptance criteria.\n\nRules:\n- Create PR when done\n- Update ticket checklist\n- Commit with TICKET-003: prefix",
+        "prompt": "Implement the AUv3 plugin wrapper. See tickets/mobile/active/TICKET-003.md for acceptance criteria.\n\nRules:\n- Create PR when done\n- Update ticket checklist\n- Commit with TICKET-003: prefix",
         "branchName": "ticket-003-ios-auv3"
     }]
 )
@@ -192,7 +192,7 @@ TICKET-003: refactor(core) migrate model loader to candle
 1. Agent creates worktree for ticket.
 2. Agent implements changes, commits with `TICKET-NNN:` prefix.
 3. Agent runs `git push --set-upstream origin branch-name`.
-4. Agent creates PR: `gh pr create --base main --title "TICKET-NNN: ..." --body "See tickets/active/TICKET-NNN.md"`.
+4. Agent creates PR: `gh pr create --base main --title "TICKET-NNN: ..." --body "See tickets/<folder>/review/TICKET-NNN.md"`.
 5. Kilo moves ticket to `tickets/<folder>/review/`.
 6. After merge, Kilo moves ticket to `tickets/<folder>/done/`.
 

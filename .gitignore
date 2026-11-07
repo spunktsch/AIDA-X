@@ -10,3 +10,5 @@
 /target/
 /.kilo/worktrees/
 !/tickets/_meta.json
+/.claude/worktrees/
+/.claude/settings.local.json
