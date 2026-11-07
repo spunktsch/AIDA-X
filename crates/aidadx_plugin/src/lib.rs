@@ -2,14 +2,20 @@
 //!
 //! - [`parameters`]: host parameters (ported 1:1 from DPF `kParameters[]`) and persisted
 //!   model/IR file paths.
-//! - [`audio`]: the format-agnostic signal chain using `aidadx_core::biquad`.
+//! - [`audio`]: the format-agnostic signal chain (`aidadx_core` biquads, RTNeural model,
+//!   two-stage convolver), fed through lock-free [`handoff`] slots.
+//! - [`loader`]: model/IR loading helpers and the bundled defaults.
 //! - This module: nih-plug glue and the `clap_entry` / `GetPluginFactory` exports.
 //!
 //! No editor is provided yet; hosts show their generic parameter UI.
 
 pub mod audio;
+pub mod handoff;
+pub mod loader;
 pub mod parameters;
 pub mod plugin_info;
+#[doc(hidden)]
+pub mod test_models;
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
