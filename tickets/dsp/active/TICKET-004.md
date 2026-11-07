@@ -4,7 +4,7 @@ status: active
 assignee:
 priority: critical
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement neural model JSON loader with candle inference
@@ -21,6 +21,7 @@ Port the dynamic model loader from `src/model_variant.hpp` and `src/aidadsp-plug
 - [x] Input/output gain compensation
 - [x] Thread-safe model swap via `AtomicPtr<DynamicModel>`
 - [x] Unit tests: load all 54 model variants from JSON, verify forward pass matches baseline
+- [ ] Real-time capable, allocation-free inference
 
 ## Implementation Notes
 - `model_variant.hpp` contains 54 model type definitions using RTNeural templates
@@ -28,3 +29,7 @@ Port the dynamic model loader from `src/model_variant.hpp` and `src/aidadsp-plug
 - Rust approach: `enum ModelVariant { Gru8, Gru12, ..., Lstm80 }` with dynamic dispatch via `Box<dyn InferenceEngine>`
 - `nlohmann::json` -> `serde_json::Value` for parsing
 - Parameter inputs PARAM1/PARAM2 must be forwarded to model forward pass
+
+## Audit 2026-11-07
+Commit 32b4247 never compiled with `--features candle` (65 errors) and its math was wrong (state reset every sample, wrong gate order/weight layout for GRU+LSTM, wrong Dense orientation, broken skip/gain). Rewritten in a9e71e2 and integrated on `integration/rust-core`: matches a scalar RTNeural transcription for all 54 variants (1e-4) and the real model `files/tw40_california_clean_deerinkstudios.json` against its exported output_batch (1e-3).
+**Blocker:** candle runs at only ~1x realtime (~15-20 us/sample fixed overhead) and allocates per op. Needs a hand-written allocation-free matvec backend (RTNeural `*LayerT` style); public API (`DynamicModel::process`, `reset`) can stay. No real GRU model file available for external GRU validation.
