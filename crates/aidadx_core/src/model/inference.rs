@@ -1,436 +1,228 @@
-use crate::model::types::{LayerConfig, LayerType, ModelArch};
+//! Candle-backed, stateful inference for the RNN + Dense networks used by AIDA-X.
+//!
+//! Weight layout and math follow RTNeural (`gru/gru.h`, `lstm/lstm.h`,
+//! `model_loader.h`), which reads the Keras-style export used by AIDA-X:
+//!
+//! * GRU:  `W[in][3H]`, `U[H][3H]`, `b[2][3H]`, gate order **z, r, h**;
+//!   `b[0]` is the input bias, `b[1]` the recurrent bias ("reset_after" GRU):
+//!   ```text
+//!   z  = σ(W_z·x + b0_z + U_z·h + b1_z)
+//!   r  = σ(W_r·x + b0_r + U_r·h + b1_r)
+//!   h~ = tanh(W_h·x + b0_h + r ⊙ (U_h·h + b1_h))
+//!   h' = (1 − z) ⊙ h~ + z ⊙ h
+//!   ```
+//! * LSTM: `W[in][4H]`, `U[H][4H]`, `b[4H]`, gate order **i, f, c, o**:
+//!   ```text
+//!   i = σ(..), f = σ(..), c~ = tanh(..), o = σ(..)
+//!   c' = f ⊙ c + i ⊙ c~,   h' = o ⊙ tanh(c')
+//!   ```
+//! * Dense: `W[H][out]`, `b[out]`, `y = h·W + b`.
+//!
+//! Because the JSON stores `W` as `[in][gates*H]`, we keep the row-vector
+//! convention `x(1×in) · W(in×gH)` and never transpose.
 
-use candle_core::{D, Device, Tensor};
-use candle_nn::VarDict;
+use crate::model::types::{LayerConfig, LayerType, ModelArch, ModelConfig, ModelError, ModelResult, WeightArray};
 
-#[derive(Clone)]
-pub struct GruWeights {
-    pub i_r: Tensor,
-    pub i_z: Tensor,
-    pub i_h: Tensor,
-    pub h_r: Tensor,
-    pub h_z: Tensor,
-    pub h_h: Tensor,
-    pub b_r: Tensor,
-    pub b_z: Tensor,
-    pub b_h: Tensor,
+use candle_core::{DType, Device, Tensor};
+
+fn expect_shape(w: &WeightArray, expected: &[usize], what: &str) -> ModelResult<()> {
+    if w.shape != expected {
+        return Err(ModelError::Unsupported(format!(
+            "{what}: expected weight shape {expected:?}, got {:?}",
+            w.shape
+        )));
+    }
+    Ok(())
 }
 
-impl GruWeights {
-    pub fn from_layer_config(config: &LayerConfig, hidden_size: usize) -> Result<Self, String> {
-        let weights = &config.weights;
-        let total = weights.len();
-        if total < 6 || total > 9 {
-            return Err(format!(
-                "GRU layer expects 6-9 weight matrices, got {}",
-                total
-            ));
-        }
-
-        let dev = Device::Cpu;
-
-        let to_tensor = |flat: Vec<f32>, shape: &[usize]| {
-            let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
-            Tensor::from_vec(flat, shape, &dev)
-                .map_err(|e| format!("Tensor creation error: {}", e))
-        };
-
-        let flatten = |mat: &Vec<Vec<f32>>| -> Result<Vec<f32>, String> {
-            let mut flat = Vec::with_capacity(mat.len() * mat.first().map(|r| r.len()).unwrap_or(0));
-            for row in mat {
-                flat.extend_from_slice(row);
-            }
-            Ok(flat)
-        };
-
-        let i_r_flat = flatten(&weights[0])?;
-        let i_z_flat = flatten(&weights[1])?;
-        let i_h_flat = flatten(&weights[2])?;
-        let h_r_flat = flatten(&weights[3])?;
-        let h_z_flat = flatten(&weights[4])?;
-        let h_h_flat = flatten(&weights[5])?;
-
-        let i_r_t = to_tensor(i_r_flat, &[hidden_size, config.input_size()])?.transpose(0, 1)?;
-        let i_z_t = to_tensor(i_z_flat, &[hidden_size, config.input_size()])?.transpose(0, 1)?;
-        let i_h_t = to_tensor(i_h_flat, &[hidden_size, config.input_size()])?.transpose(0, 1)?;
-
-        let h_r_t = to_tensor(h_r_flat, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-        let h_z_t = to_tensor(h_z_flat, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-        let h_h_t = to_tensor(h_h_flat, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-
-        let b_r_t = if total > 6 {
-            to_tensor(flatten(&weights[6])?, &[1, hidden_size])?
-        } else {
-            Tensor::zeros([1, hidden_size], D::F32, &dev)?
-        };
-        let b_z_t = if total > 7 {
-            to_tensor(flatten(&weights[7])?, &[1, hidden_size])?
-        } else {
-            Tensor::zeros([1, hidden_size], D::F32, &dev)?
-        };
-        let b_h_t = if total > 8 {
-            to_tensor(flatten(&weights[8])?, &[1, hidden_size])?
-        } else {
-            Tensor::zeros([1, hidden_size], D::F32, &dev)?
-        };
-
-        Ok(GruWeights {
-            i_r: i_r_t,
-            i_z: i_z_t,
-            i_h: i_h_t,
-            h_r: h_r_t,
-            h_z: h_z_t,
-            h_h: h_h_t,
-            b_r: b_r_t,
-            b_z: b_z_t,
-            b_h: b_h_t,
-        })
-    }
-
-    pub fn to_var_dict(&self, vd: &mut VarDict) {
-        vd.set_tensor("i_r", self.i_r.clone());
-        vd.set_tensor("i_z", self.i_z.clone());
-        vd.set_tensor("i_h", self.i_h.clone());
-        vd.set_tensor("h_r", self.h_r.clone());
-        vd.set_tensor("h_z", self.h_z.clone());
-        vd.set_tensor("h_h", self.h_h.clone());
-        vd.set_tensor("b_r", self.b_r.clone());
-        vd.set_tensor("b_z", self.b_z.clone());
-        vd.set_tensor("b_h", self.b_h.clone());
-    }
+fn tensor(w: &WeightArray, rows: usize, cols: usize, dev: &Device) -> ModelResult<Tensor> {
+    Ok(Tensor::from_slice(&w.data, (rows, cols), dev)?)
 }
 
-#[derive(Clone)]
-pub struct LstmWeights {
-    pub i_i: Tensor,
-    pub i_f: Tensor,
-    pub i_o: Tensor,
-    pub i_c: Tensor,
-    pub h_i: Tensor,
-    pub h_f: Tensor,
-    pub h_o: Tensor,
-    pub h_c: Tensor,
-    pub b_i: Tensor,
-    pub b_f: Tensor,
-    pub b_o: Tensor,
-    pub b_c: Tensor,
+#[derive(Clone, Debug)]
+enum RnnState {
+    Gru {
+        h: Tensor,
+    },
+    Lstm {
+        h: Tensor,
+        c: Tensor,
+    },
 }
 
-impl LstmWeights {
-    pub fn from_layer_config(config: &LayerConfig, hidden_size: usize) -> Result<Self, String> {
-        let weights = &config.weights;
-        let dev = Device::Cpu;
-
-        let to_tensor = |flat: Vec<f32>, shape: &[usize]| {
-            let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
-            Tensor::from_vec(flat, shape, &dev)
-                .map_err(|e| format!("Tensor creation error: {}", e))
-        };
-
-        let flatten = |mat: &Vec<Vec<f32>>| -> Result<Vec<f32>, String> {
-            let mut flat = Vec::with_capacity(mat.len() * mat.first().map(|r| r.len()).unwrap_or(0));
-            for row in mat {
-                flat.extend_from_slice(row);
-            }
-            Ok(flat)
-        };
-
-        let input_size = config.input_size();
-        let i_i_t = to_tensor(flatten(&weights[0])?, &[hidden_size, input_size])?.transpose(0, 1)?;
-        let i_f_t = to_tensor(flatten(&weights[1])?, &[hidden_size, input_size])?.transpose(0, 1)?;
-        let i_o_t = to_tensor(flatten(&weights[2])?, &[hidden_size, input_size])?.transpose(0, 1)?;
-        let i_c_t = to_tensor(flatten(&weights[3])?, &[hidden_size, input_size])?.transpose(0, 1)?;
-
-        let h_i_t = to_tensor(flatten(&weights[4])?, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-        let h_f_t = to_tensor(flatten(&weights[5])?, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-        let h_o_t = to_tensor(flatten(&weights[6])?, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-        let h_c_t = to_tensor(flatten(&weights[7])?, &[hidden_size, hidden_size])?.transpose(0, 1)?;
-
-        let b_flat = flatten(&weights[8])?;
-        let b_i_t = to_tensor(b_flat.clone(), &[1, hidden_size])?;
-        let b_f_t = to_tensor(b_flat.clone(), &[1, hidden_size])?;
-        let b_o_t = to_tensor(b_flat.clone(), &[1, hidden_size])?;
-        let b_c_t = to_tensor(b_flat, &[1, hidden_size])?;
-
-        Ok(LstmWeights {
-            i_i: i_i_t,
-            i_f: i_f_t,
-            i_o: i_o_t,
-            i_c: i_c_t,
-            h_i: h_i_t,
-            h_f: h_f_t,
-            h_o: h_o_t,
-            h_c: h_c_t,
-            b_i: b_i_t,
-            b_f: b_f_t,
-            b_o: b_o_t,
-            b_c: b_c_t,
-        })
-    }
-
-    pub fn to_var_dict(&self, vd: &mut VarDict) {
-        vd.set_tensor("i_i", self.i_i.clone());
-        vd.set_tensor("i_f", self.i_f.clone());
-        vd.set_tensor("i_o", self.i_o.clone());
-        vd.set_tensor("i_c", self.i_c.clone());
-        vd.set_tensor("h_i", self.h_i.clone());
-        vd.set_tensor("h_f", self.h_f.clone());
-        vd.set_tensor("h_o", self.h_o.clone());
-        vd.set_tensor("h_c", self.h_c.clone());
-        vd.set_tensor("b_i", self.b_i.clone());
-        vd.set_tensor("b_f", self.b_f.clone());
-        vd.set_tensor("b_o", self.b_o.clone());
-        vd.set_tensor("b_c", self.b_c.clone());
-    }
-}
-
-#[derive(Clone)]
-pub struct DenseWeights {
-    pub weight: Tensor,
-    pub bias: Tensor,
-}
-
-impl DenseWeights {
-    pub fn from_layer_config(config: &LayerConfig) -> Result<Self, String> {
-        let weights = &config.weights;
-        if weights.len() != 2 {
-            return Err(format!(
-                "Dense layer expects 2 weight arrays, got {}",
-                weights.len()
-            ));
-        }
-
-        let dev = Device::Cpu;
-
-        let flatten = |mat: &Vec<Vec<f32>>| -> Vec<f32> {
-            let mut flat = Vec::with_capacity(mat.len() * mat.first().map(|r| r.len()).unwrap_or(0));
-            for row in mat {
-                flat.extend_from_slice(row);
-            }
-            flat
-        };
-
-        let hidden_size = config.hidden_size();
-        let output_size = 1;
-
-        let weight = Tensor::from_vec(flatten(&weights[0]), [hidden_size, output_size], &dev)?;
-        let bias = Tensor::from_vec(flatten(&weights[1]), [1, output_size], &dev)?;
-
-        Ok(DenseWeights { weight, bias })
-    }
-
-    pub fn to_var_dict(&self, vd: &mut VarDict) {
-        vd.set_tensor("weight", self.weight.clone());
-        vd.set_tensor("bias", self.bias.clone());
-    }
-}
-
-pub struct GruEngine {
-    pub weights: GruWeights,
-    pub hidden_size: usize,
-    pub(crate) device: Device,
-}
-
-impl GruEngine {
-    pub fn new(weights: GruWeights, hidden_size: usize) -> Self {
-        Self {
-            weights,
-            hidden_size,
-            device: Device::Cpu,
-        }
-    }
-
-    pub fn weights_from_layer_config(config: &LayerConfig, hidden_size: usize) -> Result<GruWeights, String> {
-        GruWeights::from_layer_config(config, hidden_size)
-    }
-
-    pub fn forward(&self, input: &Tensor, hx: &Tensor) -> Result<(Tensor, Tensor), String> {
-        let ir = self.weights.i_r.matmul(input)?;
-        let iz = self.weights.i_z.matmul(input)?;
-        let ih = self.weights.i_h.matmul(input)?;
-
-        let hr = self.weights.h_r.matmul(hx)?;
-        let hz = self.weights.h_z.matmul(hx)?;
-        let hh = self.weights.h_h.matmul(hx)?;
-
-        let br = &self.weights.b_r;
-        let bz = &self.weights.b_z;
-        let bh = &self.weights.b_h;
-
-        let r = ((&ir + &hr + br).sigmoid()?)?;
-        let z = ((&iz + &hz + bz).sigmoid()?)?;
-        let h_candidate = ((&ih + (&r * &hh)? + bh).tanh()?)?;
-
-        let hx_new = (&z * hx)? + ((1.0 - &z)? * &h_candidate)?;
-
-        Ok((hx_new.clone(), hx_new))
-    }
-}
-
-pub struct LstmEngine {
-    pub weights: LstmWeights,
-    pub hidden_size: usize,
-    pub(crate) device: Device,
-}
-
-impl LstmEngine {
-    pub fn new(weights: LstmWeights, hidden_size: usize) -> Self {
-        Self {
-            weights,
-            hidden_size,
-            device: Device::Cpu,
-        }
-    }
-
-    pub fn weights_from_layer_config(config: &LayerConfig, hidden_size: usize) -> Result<LstmWeights, String> {
-        LstmWeights::from_layer_config(config, hidden_size)
-    }
-
-    pub fn forward(
-        &self,
-        input: &Tensor,
-        hx: &Tensor,
-        cx: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor), String> {
-        let ii = self.weights.i_i.matmul(input)?;
-        let if_ = self.weights.i_f.matmul(input)?;
-        let io = self.weights.i_o.matmul(input)?;
-        let ic = self.weights.i_c.matmul(input)?;
-
-        let hi = self.weights.h_i.matmul(hx)?;
-        let hf = self.weights.h_f.matmul(hx)?;
-        let ho = self.weights.h_o.matmul(hx)?;
-        let hc = self.weights.h_c.matmul(hx)?;
-
-        let bi = &self.weights.b_i;
-        let bf = &self.weights.b_f;
-        let bo = &self.weights.b_o;
-        let bc = &self.weights.b_c;
-
-        let i_gate = ((&ii + &hi + bi).sigmoid()?)?;
-        let f_gate = ((&if_ + &hf + bf).sigmoid()?)?;
-        let o_gate = ((&io + &ho + bo).sigmoid()?)?;
-        let c_candidate = ((&ic + &hc + bc).tanh()?)?;
-
-        let cx_new = (&f_gate * cx)? + (&i_gate * &c_candidate)?;
-        let h_new = (&o_gate * (&cx_new).tanh()?)?;
-
-        Ok((h_new, cx_new, h_new))
-    }
-}
-
-pub struct DenseEngine {
-    pub weights: DenseWeights,
+/// Weights + state of one recurrent layer followed by a Dense(H → 1) layer.
+#[derive(Clone, Debug)]
+pub struct ModelInference {
+    pub arch: ModelArch,
+    input_size: usize,
+    hidden_size: usize,
+    /// Kernel weights, `in × gates·H`.
+    w: Tensor,
+    /// Recurrent weights, `H × gates·H`.
+    u: Tensor,
+    /// Input bias (`1 × gates·H`). For LSTM this is the only bias.
+    b_in: Tensor,
+    /// GRU recurrent bias (`1 × 3H`); unused for LSTM.
+    b_rec: Option<Tensor>,
+    dense_w: Tensor,
+    dense_b: Tensor,
+    state: RnnState,
     device: Device,
 }
 
-impl DenseEngine {
-    pub fn new(weights: DenseWeights) -> Self {
-        Self {
-            weights,
-            device: Device::Cpu,
-        }
-    }
-
-    pub fn forward(&self, input: &Tensor) -> Result<Tensor, String> {
-        let out = self.weights.weight.matmul(input)?;
-        Ok((&out + &self.weights.bias)?)
-    }
-}
-
-pub struct ModelInference {
-    pub arch: ModelArch,
-    pub gru_engine: Option<GruEngine>,
-    pub lstm_engine: Option<LstmEngine>,
-    pub dense_engine: Option<DenseEngine>,
-}
-
 impl ModelInference {
-    pub fn from_config(config: &ModelConfig, arch: ModelArch) -> Result<Self, String> {
-        if config.layers.len() < 2 {
-            return Err("Model must have at least 2 layers (RNN + Dense)".to_string());
+    /// Builds the network from a parsed config. `arch` must have been derived from the same config.
+    pub fn from_config(config: &ModelConfig, arch: ModelArch) -> ModelResult<Self> {
+        let dev = Device::Cpu;
+        let input = arch.input_size();
+        let hidden = arch.hidden_size();
+        let gates = arch.layer_type().gate_count();
+
+        if config.layers.len() != 2 {
+            return Err(ModelError::Unsupported(format!(
+                "expected exactly 2 layers (RNN + Dense), got {}",
+                config.layers.len()
+            )));
+        }
+        let rnn: &LayerConfig = &config.layers[0];
+        let dense: &LayerConfig = &config.layers[1];
+
+        if rnn.layer_type != arch.layer_type() {
+            return Err(ModelError::Unsupported(format!(
+                "first layer is {}, expected {}",
+                rnn.layer_type,
+                arch.layer_type()
+            )));
+        }
+        if dense.layer_type != LayerType::Dense || dense.units() != 1 {
+            return Err(ModelError::Unsupported("second layer must be dense with 1 output".into()));
+        }
+        if rnn.weights.len() != 3 {
+            return Err(ModelError::Unsupported(format!(
+                "{} layer expects 3 weight arrays (kernel, recurrent, bias), got {}",
+                rnn.layer_type,
+                rnn.weights.len()
+            )));
+        }
+        if dense.weights.len() != 2 {
+            return Err(ModelError::Unsupported(format!(
+                "dense layer expects 2 weight arrays, got {}",
+                dense.weights.len()
+            )));
         }
 
-        let mut gru_engine = None;
-        let mut lstm_engine = None;
-        let mut dense_engine = None;
+        let gh = gates * hidden;
+        expect_shape(&rnn.weights[0], &[input, gh], "kernel")?;
+        expect_shape(&rnn.weights[1], &[hidden, gh], "recurrent kernel")?;
+        let w = tensor(&rnn.weights[0], input, gh, &dev)?;
+        let u = tensor(&rnn.weights[1], hidden, gh, &dev)?;
 
-        for layer in &config.layers {
-            match layer.layer_type {
-                LayerType::Gru => {
-                    let hs = layer.hidden_size();
-                    let weights = GruWeights::from_layer_config(layer, hs)?;
-                    gru_engine = Some(GruEngine::new(weights, hs));
-                }
-                LayerType::Lstm => {
-                    let hs = layer.hidden_size();
-                    let weights = LstmWeights::from_layer_config(layer, hs)?;
-                    lstm_engine = Some(LstmEngine::new(weights, hs));
-                }
-                LayerType::Dense => {
-                    let weights = DenseWeights::from_layer_config(layer)?;
-                    dense_engine = Some(DenseEngine::new(weights));
-                }
+        let (b_in, b_rec, state) = match arch.layer_type() {
+            LayerType::Gru => {
+                let b = &rnn.weights[2];
+                expect_shape(b, &[2, gh], "GRU bias")?;
+                let b_in = Tensor::from_slice(b.row(0), (1, gh), &dev)?;
+                let b_rec = Tensor::from_slice(b.row(1), (1, gh), &dev)?;
+                let h = Tensor::zeros((1, hidden), DType::F32, &dev)?;
+                (b_in, Some(b_rec), RnnState::Gru { h })
             }
-        }
+            LayerType::Lstm => {
+                let b = &rnn.weights[2];
+                expect_shape(b, &[gh], "LSTM bias")?;
+                let b_in = Tensor::from_slice(&b.data, (1, gh), &dev)?;
+                let h = Tensor::zeros((1, hidden), DType::F32, &dev)?;
+                let c = Tensor::zeros((1, hidden), DType::F32, &dev)?;
+                (b_in, None, RnnState::Lstm { h, c })
+            }
+            LayerType::Dense => unreachable!("ModelArch is always recurrent"),
+        };
 
-        if gru_engine.is_none() && lstm_engine.is_none() {
-            return Err("Model must have a GRU or LSTM layer".to_string());
-        }
+        expect_shape(&dense.weights[0], &[hidden, 1], "dense kernel")?;
+        expect_shape(&dense.weights[1], &[1], "dense bias")?;
+        let dense_w = tensor(&dense.weights[0], hidden, 1, &dev)?;
+        let dense_b = Tensor::from_slice(&dense.weights[1].data, (1, 1), &dev)?;
 
-        if dense_engine.is_none() {
-            return Err("Model must have a Dense output layer".to_string());
-        }
-
-        Ok(ModelInference {
+        Ok(Self {
             arch,
-            gru_engine,
-            lstm_engine,
-            dense_engine,
+            input_size: input,
+            hidden_size: hidden,
+            w,
+            u,
+            b_in,
+            b_rec,
+            dense_w,
+            dense_b,
+            state,
+            device: dev,
         })
     }
 
-    pub fn forward(
-        &self,
-        input: &[f32],
-        param1: f32,
-        param2: f32,
-    ) -> Result<[f32; 1], String> {
-        let dev = Device::Cpu;
-        let input_size = self.arch.input_size();
+    pub fn input_size(&self) -> usize {
+        self.input_size
+    }
 
-        let mut in_data = vec![0f32; input_size];
-        for (i, val) in input.iter().take(input_size).enumerate() {
-            in_data[i] = *val;
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Clears the recurrent state (RTNeural `reset()`).
+    pub fn reset(&mut self) -> ModelResult<()> {
+        let zeros = Tensor::zeros((1, self.hidden_size), DType::F32, &self.device)?;
+        self.state = match self.state {
+            RnnState::Gru { .. } => RnnState::Gru { h: zeros },
+            RnnState::Lstm { .. } => RnnState::Lstm {
+                h: zeros.clone(),
+                c: zeros,
+            },
+        };
+        Ok(())
+    }
+
+    /// Runs one time step. `input` must hold exactly `input_size()` values
+    /// (`[audio]`, `[audio, param1]` or `[audio, param1, param2]`).
+    /// Returns the Dense output and advances the recurrent state.
+    pub fn forward(&mut self, input: &[f32]) -> ModelResult<f32> {
+        if input.len() != self.input_size {
+            return Err(ModelError::Unsupported(format!(
+                "forward expects {} inputs, got {}",
+                self.input_size,
+                input.len()
+            )));
         }
+        let hs = self.hidden_size;
+        let x = Tensor::from_slice(input, (1, self.input_size), &self.device)?;
+        let xw = x.matmul(&self.w)?.broadcast_add(&self.b_in)?;
 
-        if input_size == 2 {
-            in_data[1] = param1;
-        } else if input_size == 3 {
-            in_data[1] = param1;
-            in_data[2] = param2;
-        }
-
-        let x = Tensor::from_vec(in_data, [1, input_size], &dev)?;
-
-        let (h_out, _) = if let Some(ref gru) = self.gru_engine {
-            let hx = Tensor::zeros([1, gru.hidden_size], candle_core::DType::F32, &dev)?;
-            gru.forward(&x, &hx)?
-        } else if let Some(ref lstm) = self.lstm_engine {
-            let hx = Tensor::zeros([1, lstm.hidden_size], candle_core::DType::F32, &dev)?;
-            let cx = Tensor::zeros([1, lstm.hidden_size], candle_core::DType::F32, &dev)?;
-            lstm.forward(&x, &hx, &cx)?
-        } else {
-            return Err("No RNN engine available".to_string());
+        let h_new = match &self.state {
+            RnnState::Gru { h } => {
+                let b_rec = self.b_rec.as_ref().expect("GRU always has a recurrent bias");
+                let hu = h.matmul(&self.u)?.broadcast_add(b_rec)?;
+                let zr = candle_nn::ops::sigmoid(&(xw.narrow(1, 0, 2 * hs)? + hu.narrow(1, 0, 2 * hs)?)?)?;
+                let z = zr.narrow(1, 0, hs)?;
+                let r = zr.narrow(1, hs, hs)?;
+                let cand = (xw.narrow(1, 2 * hs, hs)? + (r * hu.narrow(1, 2 * hs, hs)?)?)?.tanh()?;
+                // h' = (1 - z) * h~ + z * h  ==  h~ + z * (h - h~)
+                let h_new = (&cand + (z * (h - &cand)?)?)?;
+                self.state = RnnState::Gru { h: h_new.clone() };
+                h_new
+            }
+            RnnState::Lstm { h, c } => {
+                let g = (xw + h.matmul(&self.u)?)?;
+                let i = candle_nn::ops::sigmoid(&g.narrow(1, 0, hs)?)?;
+                let f = candle_nn::ops::sigmoid(&g.narrow(1, hs, hs)?)?;
+                let cand = g.narrow(1, 2 * hs, hs)?.tanh()?;
+                let o = candle_nn::ops::sigmoid(&g.narrow(1, 3 * hs, hs)?)?;
+                let c_new = ((f * c)? + (i * cand)?)?;
+                let h_new = (o * c_new.tanh()?)?;
+                self.state = RnnState::Lstm {
+                    h: h_new.clone(),
+                    c: c_new,
+                };
+                h_new
+            }
         };
 
-        let output = if let Some(ref dense) = self.dense_engine {
-            dense.forward(&h_out)?
-        } else {
-            return Err("No dense engine available".to_string());
-        };
-
-        let flat = output.to_vec1::<f32>()?;
-        Ok([flat[0]])
+        let y = h_new.matmul(&self.dense_w)?.add(&self.dense_b)?;
+        Ok(y.flatten_all()?.to_vec1::<f32>()?[0])
     }
 }
