@@ -278,6 +278,9 @@ fn atomic_model_swap_across_threads() {
             m.process(&mut buf, 0.0, 0.0).unwrap();
             assert!(buf.iter().all(|v| v.is_finite()));
         }
+        // Stands in for the loader thread's periodic GC: without it a swap deferred
+        // behind a full retired slot would never go through (TICKET-024).
+        slot.collect_garbage();
         if producer.is_finished() && !slot.has_pending() {
             break;
         }

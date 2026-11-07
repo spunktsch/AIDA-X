@@ -11,7 +11,6 @@
 //! No editor is provided yet; hosts show their generic parameter UI.
 
 pub mod audio;
-pub mod handoff;
 pub mod loader;
 pub mod parameters;
 pub mod plugin_info;
@@ -24,6 +23,9 @@ use std::sync::Arc;
 
 use nih_plug::prelude::*;
 
+/// The lock-free hand-off now lives in `aidadx_core` (TICKET-024); re-exported so
+/// `aidadx_plugin::handoff::Handoff` keeps working.
+pub use aidadx_core::handoff;
 pub use audio::{AidaEngine, PluginOutputs};
 pub use loader::{FileLoader, FileSource};
 pub use parameters::{AidaParams, ParamIdScheme, ParamSnapshot};

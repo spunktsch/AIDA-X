@@ -273,8 +273,7 @@ mod runtime {
     use crate::model::parser::parse_model;
     use crate::model::types::{db_to_coef, ModelArch, ModelConfig, ModelResult};
 
-    use std::ptr;
-    use std::sync::atomic::{AtomicPtr, Ordering};
+    use crate::handoff::Handoff;
 
     /// Name of the inference backend `DynamicModel` uses in this build
     /// (`"rtneural"` or `"candle"`).
@@ -379,93 +378,29 @@ mod runtime {
     /// Lock-free hand-off of new models to the audio thread (the C++ plugin swaps a
     /// raw `DynamicModel*`).
     ///
-    /// * Any non-real-time thread calls [`AtomicModel::publish`].
-    /// * The single audio thread calls [`AtomicModel::take_pending`] at the start
-    ///   of each block; it owns the active model and never blocks. The replaced model
-    ///   is parked in a "retired" slot and freed later by [`AtomicModel::collect_garbage`]
-    ///   (called automatically by `publish`), so deallocation stays off the audio thread
-    ///   unless two swaps happen without any intermediate `publish`/`collect_garbage`.
-    pub struct AtomicModel {
-        pending: AtomicPtr<DynamicModel>,
-        retired: AtomicPtr<DynamicModel>,
+    /// Alias of the generic [`Handoff`](crate::handoff::Handoff); see there for the
+    /// ownership rules and the memory-ordering argument.
+    ///
+    /// * Any non-real-time thread calls [`publish`](Handoff::publish) (accepts a
+    ///   `DynamicModel` or a `Box<DynamicModel>`) and, periodically,
+    ///   [`collect_garbage`](Handoff::collect_garbage).
+    /// * The single audio thread calls [`take_pending`](Handoff::take_pending) (or
+    ///   [`take`](Handoff::take)) at the start of each block. It never allocates or frees:
+    ///   the replaced model is parked in the retired slot, and if that slot is still
+    ///   occupied the swap is deferred until the producer has collected it (TICKET-024;
+    ///   the previous implementation freed the older retired model on the audio thread).
+    pub type AtomicModel = Handoff<DynamicModel>;
+
+    impl Handoff<DynamicModel> {
+        /// Legacy name of [`Handoff::take`] kept for `AtomicModel` users.
+        #[inline]
+        pub fn take_pending(&self, current: &mut Option<Box<DynamicModel>>) -> bool {
+            self.take(current)
+        }
     }
 
     const _: () = {
-        const fn assert_send<T: Send>() {}
-        assert_send::<DynamicModel>();
+        const fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AtomicModel>();
     };
-
-    impl Default for AtomicModel {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl std::fmt::Debug for AtomicModel {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("AtomicModel")
-                .field("pending", &!self.pending.load(Ordering::Relaxed).is_null())
-                .field("retired", &!self.retired.load(Ordering::Relaxed).is_null())
-                .finish()
-        }
-    }
-
-    fn free(p: *mut DynamicModel) {
-        if !p.is_null() {
-            // SAFETY: every non-null pointer stored in the slots came from
-            // `Box::into_raw` and is owned exclusively by whoever swapped it out.
-            drop(unsafe { Box::from_raw(p) });
-        }
-    }
-
-    impl AtomicModel {
-        pub fn new() -> Self {
-            Self {
-                pending: AtomicPtr::new(ptr::null_mut()),
-                retired: AtomicPtr::new(ptr::null_mut()),
-            }
-        }
-
-        /// Queues `model` for the audio thread. A previously queued model that was
-        /// never picked up is dropped (latest wins). Call from non-real-time threads.
-        pub fn publish(&self, model: DynamicModel) {
-            self.collect_garbage();
-            let new = Box::into_raw(Box::new(model));
-            free(self.pending.swap(new, Ordering::AcqRel));
-        }
-
-        /// True if a model is waiting to be picked up.
-        pub fn has_pending(&self) -> bool {
-            !self.pending.load(Ordering::Acquire).is_null()
-        }
-
-        /// Audio thread: installs a pending model into `current` (if any) and retires
-        /// the previous one. Returns `true` when the active model changed.
-        /// Must only be called from a single consumer thread.
-        pub fn take_pending(&self, current: &mut Option<Box<DynamicModel>>) -> bool {
-            let p = self.pending.swap(ptr::null_mut(), Ordering::AcqRel);
-            if p.is_null() {
-                return false;
-            }
-            // SAFETY: pointer came from `Box::into_raw` in `publish`; swapping it out
-            // transferred ownership to us.
-            let new = unsafe { Box::from_raw(p) };
-            if let Some(old) = current.replace(new) {
-                free(self.retired.swap(Box::into_raw(old), Ordering::AcqRel));
-            }
-            true
-        }
-
-        /// Frees a model retired by the audio thread. Call from non-real-time threads.
-        pub fn collect_garbage(&self) {
-            free(self.retired.swap(ptr::null_mut(), Ordering::AcqRel));
-        }
-    }
-
-    impl Drop for AtomicModel {
-        fn drop(&mut self) {
-            free(*self.pending.get_mut());
-            free(*self.retired.get_mut());
-        }
-    }
 }

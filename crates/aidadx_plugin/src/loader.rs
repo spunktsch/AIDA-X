@@ -31,7 +31,7 @@ use aidadx_core::model::DynamicModel;
 use nih_plug::{nih_error, nih_log};
 
 use crate::audio::{CabinetSlot, ModelSlot};
-use crate::handoff::Handoff;
+use aidadx_core::handoff::Handoff;
 use crate::parameters::STATE_DEFAULT_FILE;
 
 /// Bundled default model (`files/tw40_california_clean_deerinkstudios.json`).
