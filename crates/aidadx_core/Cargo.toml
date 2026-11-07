@@ -12,6 +12,9 @@ rtrb = "0.3"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hound = "=3.5.1"
+claxon = "=0.4.3"
+rubato = { version = "=5.0.1", default-features = false, features = ["fft_resampler"] }
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
 
