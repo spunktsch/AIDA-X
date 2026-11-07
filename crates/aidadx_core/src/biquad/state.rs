@@ -214,7 +214,7 @@ impl AidaToneControl {
             eq_bypass: false,
             eq_pos: EqPos::Post,
             mid_type: MidEqType::Peak,
-            dc_blocker_enabled: false,
+            dc_blocker_enabled: true, // C++: enabledDC = true (aidadsp-plugin.cpp:292)
             input_lpf_enabled: true,
         };
 
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(tc.mid_type, MidEqType::Peak);
         assert!(!tc.eq_bypass);
         assert!(!tc.net_bypass);
-        assert!(!tc.dc_blocker_enabled);
+        assert!(tc.dc_blocker_enabled);
     }
 
     #[test]
