@@ -21,19 +21,10 @@
 //! Because the JSON stores `W` as `[in][gates*H]`, we keep the row-vector
 //! convention `x(1×in) · W(in×gH)` and never transpose.
 
+use crate::model::loader::validate_network;
 use crate::model::types::{LayerConfig, LayerType, ModelArch, ModelConfig, ModelError, ModelResult, WeightArray};
 
 use candle_core::{DType, Device, Tensor};
-
-fn expect_shape(w: &WeightArray, expected: &[usize], what: &str) -> ModelResult<()> {
-    if w.shape != expected {
-        return Err(ModelError::Unsupported(format!(
-            "{what}: expected weight shape {expected:?}, got {:?}",
-            w.shape
-        )));
-    }
-    Ok(())
-}
 
 fn tensor(w: &WeightArray, rows: usize, cols: usize, dev: &Device) -> ModelResult<Tensor> {
     Ok(Tensor::from_slice(&w.data, (rows, cols), dev)?)
@@ -78,49 +69,17 @@ impl ModelInference {
         let hidden = arch.hidden_size();
         let gates = arch.layer_type().gate_count();
 
-        if config.layers.len() != 2 {
-            return Err(ModelError::Unsupported(format!(
-                "expected exactly 2 layers (RNN + Dense), got {}",
-                config.layers.len()
-            )));
-        }
+        validate_network(config, arch)?;
         let rnn: &LayerConfig = &config.layers[0];
         let dense: &LayerConfig = &config.layers[1];
 
-        if rnn.layer_type != arch.layer_type() {
-            return Err(ModelError::Unsupported(format!(
-                "first layer is {}, expected {}",
-                rnn.layer_type,
-                arch.layer_type()
-            )));
-        }
-        if dense.layer_type != LayerType::Dense || dense.units() != 1 {
-            return Err(ModelError::Unsupported("second layer must be dense with 1 output".into()));
-        }
-        if rnn.weights.len() != 3 {
-            return Err(ModelError::Unsupported(format!(
-                "{} layer expects 3 weight arrays (kernel, recurrent, bias), got {}",
-                rnn.layer_type,
-                rnn.weights.len()
-            )));
-        }
-        if dense.weights.len() != 2 {
-            return Err(ModelError::Unsupported(format!(
-                "dense layer expects 2 weight arrays, got {}",
-                dense.weights.len()
-            )));
-        }
-
         let gh = gates * hidden;
-        expect_shape(&rnn.weights[0], &[input, gh], "kernel")?;
-        expect_shape(&rnn.weights[1], &[hidden, gh], "recurrent kernel")?;
         let w = tensor(&rnn.weights[0], input, gh, &dev)?;
         let u = tensor(&rnn.weights[1], hidden, gh, &dev)?;
 
         let (b_in, b_rec, state) = match arch.layer_type() {
             LayerType::Gru => {
                 let b = &rnn.weights[2];
-                expect_shape(b, &[2, gh], "GRU bias")?;
                 let b_in = Tensor::from_slice(b.row(0), (1, gh), &dev)?;
                 let b_rec = Tensor::from_slice(b.row(1), (1, gh), &dev)?;
                 let h = Tensor::zeros((1, hidden), DType::F32, &dev)?;
@@ -128,7 +87,6 @@ impl ModelInference {
             }
             LayerType::Lstm => {
                 let b = &rnn.weights[2];
-                expect_shape(b, &[gh], "LSTM bias")?;
                 let b_in = Tensor::from_slice(&b.data, (1, gh), &dev)?;
                 let h = Tensor::zeros((1, hidden), DType::F32, &dev)?;
                 let c = Tensor::zeros((1, hidden), DType::F32, &dev)?;
@@ -137,8 +95,6 @@ impl ModelInference {
             LayerType::Dense => unreachable!("ModelArch is always recurrent"),
         };
 
-        expect_shape(&dense.weights[0], &[hidden, 1], "dense kernel")?;
-        expect_shape(&dense.weights[1], &[1], "dense bias")?;
         let dense_w = tensor(&dense.weights[0], hidden, 1, &dev)?;
         let dense_b = Tensor::from_slice(&dense.weights[1].data, (1, 1), &dev)?;
 
