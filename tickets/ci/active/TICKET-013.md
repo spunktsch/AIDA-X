@@ -94,3 +94,6 @@ unverified (non-blocking); pluginval on Linux may need more X/audio libs than xv
 ## Review 2026-11-07
 First CI run (push of `integration/rust-core`, run 42407904841): clippy, linux-x64, linux-arm64, windows-x64 **green** (tests + bundle + upload). macos-arm64/macos-x64 **failed to start**: runner image `macos-14` no longer supported -> switched to `macos-15`. `validate` and `release` were skipped because `build` was not fully green; validators therefore still never ran. Node 20 deprecation warning on `actions/checkout@v4`.
 The C++ `build.yml` is broken independently of this branch (no C++ inputs changed): retired runners `ubuntu-20.04`/`macos-13` never start, win64 fails in `dpf-cmake-action` -> TICKET-026.
+
+## CI result 2026-11-07 (second run)
+Run 42413331345 on 6b3eeea: all jobs green — clippy, build on linux-x64, linux-arm64, windows-x64, macos-arm64 (macos-15), macos-x64 (cross-compiled from arm64, C++ shim included), validate on linux-x64/windows-x64. Validate job made blocking. Artifact upload with SHA256 now verified by a real run (release job only runs on tags, still untested). Remaining warning: Node.js 20 deprecation for `actions/checkout@v4` and `actions/download-artifact@v4` — bump when the newer majors are confirmed.

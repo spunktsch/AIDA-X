@@ -125,13 +125,12 @@ jobs:
             dist/AIDA-X-${{ matrix.name }}.zip.sha256
           if-no-files-found: error
 
-  # clap-validator + pluginval on the bundles built above. Non-blocking until the pinned
-  # validator URLs in scripts/validate-plugin.* have been verified by a first run.
+  # clap-validator + pluginval on the bundles built above. Blocking since the first green
+  # run (42413331345) verified the pinned validator URLs in scripts/validate-plugin.*.
   validate:
     name: validate (${{ matrix.name }})
     needs: build
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:

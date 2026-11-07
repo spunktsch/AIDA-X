@@ -13,10 +13,10 @@ updated: 2026-11-07
 The plugin has never been loaded by a host or validator.
 
 ## Acceptance Criteria
-- [ ] clap-validator run on the CLAP build, all failures fixed or documented
-      (script ready, awaiting approval to download/run validators)
-- [ ] pluginval (strictness 5+) on the VST3 bundle
-      (script ready, awaiting approval to download/run validators)
+- [x] clap-validator run on the CLAP build, all failures fixed or documented
+      (passed in CI run 42413331345 on linux-x64 and windows-x64)
+- [x] pluginval (strictness 5+) on the VST3 bundle
+      (strictness 5 passed in CI run 42413331345 on linux-x64 and windows-x64)
 - [x] Bundle layout (`.vst3` folder, `.clap`) produced by a script or xtask
 - [ ] Smoke test in at least one DAW documented
 
@@ -93,3 +93,6 @@ Findings that are upstream nih-plug behaviour (not fixed, document if validators
 
 ## Review 2026-11-07
 First CI run: `validate` job skipped (macOS build jobs failed to start, see TICKET-013). Validators have still never run; next CI run after the macOS runner fix should execute them on linux-x64 and windows-x64.
+
+## CI result 2026-11-07
+Run 42413331345: `validate (linux-x64)` and `validate (windows-x64)` green. The script aborts on download/hash/validator failure, so both validators were downloaded from the pinned URLs and passed. Detailed validator logs need authenticated GitHub access and were not inspected (e.g. number of skipped clap-validator tests). Validate job is now blocking. Not covered: macOS validation, strictness >5, DAW smoke test.
