@@ -373,14 +373,6 @@ mod tests {
         );
     }
 
-    fn coeff_eq(c: &Coefficients, expected: &Coefficients, name: &str) {
-        assert_close(c.a0, expected.a0 as f32, &format!("{}_a0", name));
-        assert_close(c.a1, expected.a1 as f32, &format!("{}_a1", name));
-        assert_close(c.a2, expected.a2 as f32, &format!("{}_a2", name));
-        assert_close(c.b1, expected.b1 as f32, &format!("{}_b1", name));
-        assert_close(c.b2, expected.b2 as f32, &format!("{}_b2", name));
-    }
-
     #[test]
     fn test_lowpass() {
         let mut bq = Biquad::new();
@@ -464,7 +456,7 @@ mod tests {
         let mut bq = Biquad::new();
         bq.set_biquad(BiquadType::LowPass, 0.25, 0.707, 0.0);
 
-        let input: Vec<f32> = (0..64).map(|i| (i as f32 * 0.01)).collect();
+        let input: Vec<f32> = (0..64).map(|i| i as f32 * 0.01).collect();
         let mut output = vec![0.0f32; 64];
 
         bq.process_buffer(&input, &mut output);

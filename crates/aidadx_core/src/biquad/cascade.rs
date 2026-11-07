@@ -227,7 +227,9 @@ mod tests {
 
     #[test]
     fn test_cascade_creation() {
-        let cascade = BiquadCascade::new();
+        let mut cascade = BiquadCascade::new();
+        // Default-constructed stages are pass-through low-pass biquads.
+        assert_eq!(cascade.mid().params().filter_type, BiquadType::LowPass);
     }
 
     #[test]
