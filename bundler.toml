@@ -1,0 +1,7 @@
+# Metadata for `cargo xtask bundle <package>` (nih_plug_xtask).
+#
+# [package_name]
+# name = "Human readable bundle name"  # defaults to <package_name>
+
+[aidadx_plugin]
+name = "AIDA-X"

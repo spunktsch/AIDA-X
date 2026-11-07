@@ -7,6 +7,7 @@ members = [
     "crates/aidadx_ios",
     "crates/aidadx_cli",
     "crates/aidadx_rtneural",
+    "xtask",
 ]
 
 [workspace.package]
