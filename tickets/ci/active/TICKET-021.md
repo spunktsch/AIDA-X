@@ -1,6 +1,6 @@
 ---
 id: TICKET-021
-status: backlog
+status: active
 assignee:
 priority: medium
 created: 2026-11-07
