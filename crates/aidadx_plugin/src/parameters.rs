@@ -1,560 +1,367 @@
-/// Parameter definitions matching DistrhoPluginCommon.hpp exactly.
+//! Host-visible parameters and persisted state, ported from `kParameters[]` in
+//! `src/DistrhoPluginCommon.hpp` and `initParameter()`/`initState()` in
+//! `src/aidadsp-plugin.cpp`.
+//!
+//! Parameter IDs are the DPF *symbols* (e.g. `PREGAIN`, `MASTER`, `dpf_bypass`) so that
+//! automation lanes and presets keep a stable, recognisable identity. Fields are declared
+//! in the C++ enum order (`kParameterINLPF` .. `kParameterDCBLOCKER`), which nih-plug uses
+//! as the host-facing order.
+//!
+//! The three DPF *output* parameters (`ModelInSize`, `MeterIn`, `MeterOut`) have no
+//! equivalent in nih-plug (neither the CLAP nor the VST3 wrapper supports read-only
+//! output parameters), so they are exposed through [`crate::PluginOutputs`] instead.
+
+use std::sync::{Arc, RwLock};
+
+use nih_plug::prelude::*;
+
+/// DPF state key for the neural model file (`kStateModelFile`).
+pub const STATE_KEY_MODEL: &str = "json";
+/// DPF state key for the cabinet impulse response file (`kStateImpulseFile`).
+pub const STATE_KEY_CABINET: &str = "cabinet";
+/// DPF default value for file states; means "load the bundled default".
+pub const STATE_DEFAULT_FILE: &str = "default";
+
+/// EQ position (`enum EqPos` / `kEQPOS`). Variant order is the plain value: POST=0, PRE=1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum EqPosition {
+    #[id = "post"]
+    #[name = "POST"]
+    Post,
+    #[id = "pre"]
+    #[name = "PRE"]
+    Pre,
+}
+
+/// Mid band type (`enum MidEqType` / `kMTYPE`). PEAK=0, BANDPASS=1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum MidType {
+    #[id = "peak"]
+    #[name = "PEAK"]
+    Peak,
+    #[id = "bandpass"]
+    #[name = "BANDPASS"]
+    Bandpass,
+}
+
+/// Host parameter IDs in C++ `enum Parameters` order (input parameters only).
+pub const PARAMETER_IDS: [&str; 21] = [
+    "ANTIALIASING",
+    "PREGAIN",
+    "NETBYPASS",
+    "EQBYPASS",
+    "EQPOS",
+    "BASS",
+    "BFREQ",
+    "MID",
+    "MFREQ",
+    "MIDQ",
+    "MTYPE",
+    "TREBLE",
+    "TFREQ",
+    "DEPTH",
+    "PRESENCE",
+    "MASTER",
+    "CABSIMBYPASS",
+    "dpf_bypass",
+    "PARAM1",
+    "PARAM2",
+    "DCBLOCKER",
+];
+
+#[derive(Params)]
+pub struct AidaParams {
+    /// `kParameterINLPF`: input anti-aliasing low-pass amount. 0 disables the filter.
+    #[id = "ANTIALIASING"]
+    pub antialiasing: FloatParam,
+    /// `kParameterINLEVEL`: input gain.
+    #[id = "PREGAIN"]
+    pub input: FloatParam,
+    /// `kParameterNETBYPASS`: bypass the neural model stage.
+    #[id = "NETBYPASS"]
+    pub net_bypass: BoolParam,
+    /// `kParameterEQBYPASS`: bypass the tone stack.
+    #[id = "EQBYPASS"]
+    pub eq_bypass: BoolParam,
+    /// `kParameterEQPOS`: tone stack before or after the model.
+    #[id = "EQPOS"]
+    pub eq_pos: EnumParam<EqPosition>,
+    /// `kParameterBASSGAIN`
+    #[id = "BASS"]
+    pub bass: FloatParam,
+    /// `kParameterBASSFREQ`
+    #[id = "BFREQ"]
+    pub bass_freq: FloatParam,
+    /// `kParameterMIDGAIN`
+    #[id = "MID"]
+    pub mid: FloatParam,
+    /// `kParameterMIDFREQ`
+    #[id = "MFREQ"]
+    pub mid_freq: FloatParam,
+    /// `kParameterMIDQ`
+    #[id = "MIDQ"]
+    pub mid_q: FloatParam,
+    /// `kParameterMTYPE`
+    #[id = "MTYPE"]
+    pub mid_type: EnumParam<MidType>,
+    /// `kParameterTREBLEGAIN`
+    #[id = "TREBLE"]
+    pub treble: FloatParam,
+    /// `kParameterTREBLEFREQ`
+    #[id = "TFREQ"]
+    pub treble_freq: FloatParam,
+    /// `kParameterDEPTH`
+    #[id = "DEPTH"]
+    pub depth: FloatParam,
+    /// `kParameterPRESENCE`
+    #[id = "PRESENCE"]
+    pub presence: FloatParam,
+    /// `kParameterOUTLEVEL`: output gain.
+    #[id = "MASTER"]
+    pub output: FloatParam,
+    /// `kParameterCABSIMBYPASS`
+    #[id = "CABSIMBYPASS"]
+    pub cabsim_bypass: BoolParam,
+    /// `kParameterGLOBALBYPASS` (designation: bypass).
+    #[id = "dpf_bypass"]
+    pub bypass: BoolParam,
+    /// `kParameterPARAM1`: first conditioning input for parametric models.
+    #[id = "PARAM1"]
+    pub param1: FloatParam,
+    /// `kParameterPARAM2`: second conditioning input for parametric models.
+    #[id = "PARAM2"]
+    pub param2: FloatParam,
+    /// `kParameterDCBLOCKER`
+    #[id = "DCBLOCKER"]
+    pub dc_blocker: BoolParam,
+
+    /// `kStateModelFile` ("json"): absolute path of the loaded `.json` model, or
+    /// [`STATE_DEFAULT_FILE`] / empty for the bundled default.
+    #[persist = "json"]
+    pub model_file: Arc<RwLock<String>>,
+    /// `kStateImpulseFile` ("cabinet"): absolute path of the loaded `.wav`/`.flac` IR, or
+    /// [`STATE_DEFAULT_FILE`] / empty for the bundled default.
+    #[persist = "cabinet"]
+    pub cabinet_file: Arc<RwLock<String>>,
+}
+
+fn linear(name: &str, default: f32, min: f32, max: f32, unit: &'static str) -> FloatParam {
+    FloatParam::new(name, default, FloatRange::Linear { min, max })
+        .with_unit(unit)
+        .with_value_to_string(formatters::v2s_f32_rounded(2))
+}
+
+fn db(name: &str, min: f32, max: f32) -> FloatParam {
+    linear(name, 0.0, min, max, " dB")
+}
+
+fn hz(name: &str, default: f32, min: f32, max: f32) -> FloatParam {
+    linear(name, default, min, max, " Hz").with_value_to_string(formatters::v2s_f32_rounded(0))
+}
+
+/// DPF boolean parameters without enumeration labels.
+fn on_off(name: &str, default: bool) -> BoolParam {
+    BoolParam::new(name, default)
+}
+
+impl Default for AidaParams {
+    fn default() -> Self {
+        Self {
+            // Value 0 is labelled "Off" in initParameter().
+            antialiasing: linear("ANTIALIASING", 66.216, 0.0, 100.0, " %").with_value_to_string(
+                Arc::new(|v| {
+                    if v == 0.0 {
+                        String::from("Off")
+                    } else {
+                        format!("{v:.1}")
+                    }
+                }),
+            ),
+            input: db("INPUT", -12.0, 12.0),
+            net_bypass: on_off("NETBYPASS", false),
+            eq_bypass: on_off("EQBYPASS", false),
+            eq_pos: EnumParam::new("EQPOS", EqPosition::Post),
+            bass: db("BASS", -8.0, 8.0),
+            bass_freq: hz("BFREQ", 305.0, 75.0, 600.0),
+            mid: db("MID", -8.0, 8.0),
+            mid_freq: hz("MFREQ", 750.0, 150.0, 5000.0),
+            mid_q: linear("MIDQ", 0.707, 0.2, 5.0, "").with_value_to_string(
+                formatters::v2s_f32_rounded(3),
+            ),
+            mid_type: EnumParam::new("MTYPE", MidType::Peak),
+            treble: db("TREBLE", -8.0, 8.0),
+            treble_freq: hz("TFREQ", 2000.0, 1000.0, 4000.0),
+            depth: db("DEPTH", -8.0, 8.0),
+            presence: db("PRESENCE", -8.0, 8.0),
+            output: db("OUTPUT", -15.0, 15.0),
+            cabsim_bypass: on_off("CABSIMBYPASS", false),
+            // initParameter() overrides kBYPASS with PROCESSING/BYPASSED labels.
+            bypass: BoolParam::new("Bypass", false)
+                .make_bypass()
+                .with_value_to_string(Arc::new(|v| {
+                    String::from(if v { "BYPASSED" } else { "PROCESSING" })
+                }))
+                .with_string_to_value(Arc::new(|s| match s.trim() {
+                    s if s.eq_ignore_ascii_case("BYPASSED") => Some(true),
+                    s if s.eq_ignore_ascii_case("PROCESSING") => Some(false),
+                    _ => None,
+                })),
+            param1: linear("PARAM1", 0.0, 0.0, 1.0, ""),
+            param2: linear("PARAM2", 0.0, 0.0, 1.0, ""),
+            dc_blocker: on_off("DCBLOCKER", true),
+
+            model_file: Arc::new(RwLock::new(String::from(STATE_DEFAULT_FILE))),
+            cabinet_file: Arc::new(RwLock::new(String::from(STATE_DEFAULT_FILE))),
+        }
+    }
+}
+
+/// Plain-value snapshot of all input parameters, read once per block on the audio thread.
 ///
-/// 24 parameters total (kParameterCount = 24), matching the C++ enum:
-///   kParameterINLPF=0, kParameterINLEVEL=1, kParameterNETBYPASS=2,
-///   kParameterEQBYPASS=3, kParameterEQPOS=4, kParameterBASSGAIN=5,
-///   kParameterBASSFREQ=6, kParameterMIDGAIN=7, kParameterMIDFREQ=8,
-///   kParameterMIDQ=9, kParameterMTYPE=10, kParameterTREBLEGAIN=11,
-///   kParameterTREBLEFREQ=12, kParameterDEPTH=13, kParameterPRESENCE=14,
-///   kParameterOUTLEVEL=15, kParameterCABSIMBYPASS=16,
-///   kParameterGLOBALBYPASS=17, kParameterPARAM1=18, kParameterPARAM2=19,
-///   kParameterDCBLOCKER=20, kParameterModelInputSize=21,
-///   kParameterMeterIn=22, kParameterMeterOut=23
-
-use aidadx_core::biquad::{EqPos, MidEqType};
-
-/// Parameter index matching the C++ enum order
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum ParameterIndex {
-    Antialiasing = 0,       // INLPF
-    InputLevel,             // INLEVEL
-    NetBypass,              // NETBYPASS
-    EqBypass,               // EQBYPASS
-    EqPos,                  // EQPOS
-    BassGain,               // BASSGAIN
-    BassFreq,               // BASSFREQ
-    MidGain,                // MIDGAIN
-    MidFreq,                // MIDFREQ
-    MidQ,                   // MIDQ
-    MidType,                // MTYPE
-    TrebleGain,             // TREBLEGAIN
-    TrebleFreq,             // TREBLEFREQ
-    Depth,                  // DEPTH
-    Presence,               // PRESENCE
-    OutputLevel,            // OUTLEVEL
-    CabSimBypass,           // CABSIMBYPASS
-    GlobalBypass,           // GLOBALBYPASS
-    Param1,                 // PARAM1
-    Param2,                 // PARAM2
-    DcBlocker,              // DCBLOCKER
-    ModelInputSize,         // Model Input Size (output)
-    MeterIn,                // Meter In (output)
-    MeterOut,               // Meter Out (output)
+/// This is the boundary between nih-plug and the format-agnostic [`crate::audio`] engine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamSnapshot {
+    pub antialiasing: f32,
+    pub input_db: f32,
+    pub net_bypass: bool,
+    pub eq_bypass: bool,
+    pub eq_pos: EqPosition,
+    pub bass_db: f32,
+    pub bass_freq: f32,
+    pub mid_db: f32,
+    pub mid_freq: f32,
+    pub mid_q: f32,
+    pub mid_type: MidType,
+    pub treble_db: f32,
+    pub treble_freq: f32,
+    pub depth_db: f32,
+    pub presence_db: f32,
+    pub output_db: f32,
+    pub cabsim_bypass: bool,
+    pub bypass: bool,
+    pub param1: f32,
+    pub param2: f32,
+    pub dc_blocker: bool,
 }
 
-impl ParameterIndex {
-    pub const COUNT: u32 = 24;
-
-    pub fn from_u32(index: u32) -> Option<ParameterIndex> {
-        match index {
-            0 => Some(ParameterIndex::Antialiasing),
-            1 => Some(ParameterIndex::InputLevel),
-            2 => Some(ParameterIndex::NetBypass),
-            3 => Some(ParameterIndex::EqBypass),
-            4 => Some(ParameterIndex::EqPos),
-            5 => Some(ParameterIndex::BassGain),
-            6 => Some(ParameterIndex::BassFreq),
-            7 => Some(ParameterIndex::MidGain),
-            8 => Some(ParameterIndex::MidFreq),
-            9 => Some(ParameterIndex::MidQ),
-            10 => Some(ParameterIndex::MidType),
-            11 => Some(ParameterIndex::TrebleGain),
-            12 => Some(ParameterIndex::TrebleFreq),
-            13 => Some(ParameterIndex::Depth),
-            14 => Some(ParameterIndex::Presence),
-            15 => Some(ParameterIndex::OutputLevel),
-            16 => Some(ParameterIndex::CabSimBypass),
-            17 => Some(ParameterIndex::GlobalBypass),
-            18 => Some(ParameterIndex::Param1),
-            19 => Some(ParameterIndex::Param2),
-            20 => Some(ParameterIndex::DcBlocker),
-            21 => Some(ParameterIndex::ModelInputSize),
-            22 => Some(ParameterIndex::MeterIn),
-            23 => Some(ParameterIndex::MeterOut),
-            _ => None,
-        }
-    }
-
-    pub fn as_u32(self) -> u32 {
-        self as u32
+impl Default for ParamSnapshot {
+    /// The DPF defaults from `kParameters[]`.
+    fn default() -> Self {
+        AidaParams::default().snapshot()
     }
 }
 
-/// Parameter definition matching DPF Parameter struct exactly
-#[derive(Debug, Clone)]
-pub struct ParameterDef {
-    pub index: ParameterIndex,
-    pub clap_id: &'static str,
-    pub name: &'static str,
-    pub unit: &'static str,
-    pub default_value: f64,
-    pub min_value: f64,
-    pub max_value: f64,
-    pub is_output: bool,
-    pub is_boolean: bool,
-    pub is_integer: bool,
-    pub enums: &'static [ParameterEnumeration],
+impl AidaParams {
+    /// Read the current (unsmoothed) plain value of every input parameter.
+    pub fn snapshot(&self) -> ParamSnapshot {
+        ParamSnapshot {
+            antialiasing: self.antialiasing.value(),
+            input_db: self.input.value(),
+            net_bypass: self.net_bypass.value(),
+            eq_bypass: self.eq_bypass.value(),
+            eq_pos: self.eq_pos.value(),
+            bass_db: self.bass.value(),
+            bass_freq: self.bass_freq.value(),
+            mid_db: self.mid.value(),
+            mid_freq: self.mid_freq.value(),
+            mid_q: self.mid_q.value(),
+            mid_type: self.mid_type.value(),
+            treble_db: self.treble.value(),
+            treble_freq: self.treble_freq.value(),
+            depth_db: self.depth.value(),
+            presence_db: self.presence.value(),
+            output_db: self.output.value(),
+            cabsim_bypass: self.cabsim_bypass.value(),
+            bypass: self.bypass.value(),
+            param1: self.param1.value(),
+            param2: self.param2.value(),
+            dc_blocker: self.dc_blocker.value(),
+        }
+    }
 }
 
-/// Enumeration value for integer/discrete parameters
-#[derive(Debug, Clone)]
-pub struct ParameterEnumeration {
-    pub value: f64,
-    pub label: &'static str,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// All 24 parameter definitions matching DPF kParameters[] exactly
-pub fn all_parameters() -> [ParameterDef; 24] {
-    [
-        // 0: ANTIALIASING (INLPF) - input lowpass filter knob
-        ParameterDef {
-            index: ParameterIndex::Antialiasing,
-            clap_id: "antialiasing",
-            name: "ANTIALIASING",
-            unit: "%",
-            default_value: 66.216,
-            min_value: 0.0,
-            max_value: 100.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 1: INPUT / PREGAIN
-        ParameterDef {
-            index: ParameterIndex::InputLevel,
-            clap_id: "input_level",
-            name: "INPUT",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -12.0,
-            max_value: 12.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 2: NETBYPASS
-        ParameterDef {
-            index: ParameterIndex::NetBypass,
-            clap_id: "net_bypass",
-            name: "NETBYPASS",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: true,
-            is_integer: true,
-            enums: &BYPASS_ENUM,
-        },
-        // 3: EQBYPASS
-        ParameterDef {
-            index: ParameterIndex::EqBypass,
-            clap_id: "eq_bypass",
-            name: "EQBYPASS",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: true,
-            is_integer: true,
-            enums: &BYPASS_ENUM,
-        },
-        // 4: EQPOS - pre/post EQ position
-        ParameterDef {
-            index: ParameterIndex::EqPos,
-            clap_id: "eq_pos",
-            name: "EQPOS",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: true,
-            enums: &EQPOS_ENUM,
-        },
-        // 5: BASS
-        ParameterDef {
-            index: ParameterIndex::BassGain,
-            clap_id: "bass_gain",
-            name: "BASS",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -8.0,
-            max_value: 8.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 6: BFREQ
-        ParameterDef {
-            index: ParameterIndex::BassFreq,
-            clap_id: "bass_freq",
-            name: "BFREQ",
-            unit: "Hz",
-            default_value: 305.0,
-            min_value: 75.0,
-            max_value: 600.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 7: MID
-        ParameterDef {
-            index: ParameterIndex::MidGain,
-            clap_id: "mid_gain",
-            name: "MID",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -8.0,
-            max_value: 8.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 8: MFREQ
-        ParameterDef {
-            index: ParameterIndex::MidFreq,
-            clap_id: "mid_freq",
-            name: "MFREQ",
-            unit: "Hz",
-            default_value: 750.0,
-            min_value: 150.0,
-            max_value: 5000.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 9: MIDQ
-        ParameterDef {
-            index: ParameterIndex::MidQ,
-            clap_id: "mid_q",
-            name: "MIDQ",
-            unit: "",
-            default_value: 0.707,
-            min_value: 0.2,
-            max_value: 5.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 10: MTYPE
-        ParameterDef {
-            index: ParameterIndex::MidType,
-            clap_id: "mid_type",
-            name: "MTYPE",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: true,
-            enums: &MTYPE_ENUM,
-        },
-        // 11: TREBLE
-        ParameterDef {
-            index: ParameterIndex::TrebleGain,
-            clap_id: "treble_gain",
-            name: "TREBLE",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -8.0,
-            max_value: 8.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 12: TFREQ
-        ParameterDef {
-            index: ParameterIndex::TrebleFreq,
-            clap_id: "treble_freq",
-            name: "TFREQ",
-            unit: "Hz",
-            default_value: 2000.0,
-            min_value: 1000.0,
-            max_value: 4000.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 13: DEPTH
-        ParameterDef {
-            index: ParameterIndex::Depth,
-            clap_id: "depth",
-            name: "DEPTH",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -8.0,
-            max_value: 8.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 14: PRESENCE
-        ParameterDef {
-            index: ParameterIndex::Presence,
-            clap_id: "presence",
-            name: "PRESENCE",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -8.0,
-            max_value: 8.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 15: OUTPUT / MASTER
-        ParameterDef {
-            index: ParameterIndex::OutputLevel,
-            clap_id: "output_level",
-            name: "OUTPUT",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: -15.0,
-            max_value: 15.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 16: CABSIMBYPASS
-        ParameterDef {
-            index: ParameterIndex::CabSimBypass,
-            clap_id: "cab_sim_bypass",
-            name: "CABSIMBYPASS",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: true,
-            is_integer: true,
-            enums: &BYPASS_ENUM,
-        },
-        // 17: GLOBAL Bypass (dpf_bypass)
-        ParameterDef {
-            index: ParameterIndex::GlobalBypass,
-            clap_id: "bypass",
-            name: "Bypass",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: true,
-            is_integer: true,
-            enums: &GLOBAL_BYPASS_ENUM,
-        },
-        // 18: PARAM1
-        ParameterDef {
-            index: ParameterIndex::Param1,
-            clap_id: "param1",
-            name: "PARAM1",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 19: PARAM2
-        ParameterDef {
-            index: ParameterIndex::Param2,
-            clap_id: "param2",
-            name: "PARAM2",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 20: DCBLOCKER
-        ParameterDef {
-            index: ParameterIndex::DcBlocker,
-            clap_id: "dc_blocker",
-            name: "DCBLOCKER",
-            unit: "",
-            default_value: 1.0,
-            min_value: 0.0,
-            max_value: 1.0,
-            is_output: false,
-            is_boolean: true,
-            is_integer: true,
-            enums: &DC_BLOCKER_ENUM,
-        },
-        // 21: Model Input Size (output only)
-        ParameterDef {
-            index: ParameterIndex::ModelInputSize,
-            clap_id: "model_input_size",
-            name: "Model Input Size",
-            unit: "",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 3.0,
-            is_output: true,
-            is_boolean: false,
-            is_integer: true,
-            enums: &MODEL_IN_SIZE_ENUM,
-        },
-        // 22: Meter In (output only)
-        ParameterDef {
-            index: ParameterIndex::MeterIn,
-            clap_id: "meter_in",
-            name: "Meter In",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 2.0,
-            is_output: true,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-        // 23: Meter Out (output only)
-        ParameterDef {
-            index: ParameterIndex::MeterOut,
-            clap_id: "meter_out",
-            name: "Meter Out",
-            unit: "dB",
-            default_value: 0.0,
-            min_value: 0.0,
-            max_value: 2.0,
-            is_output: true,
-            is_boolean: false,
-            is_integer: false,
-            enums: &[],
-        },
-    ]
-}
+    /// (symbol, name, unit, default, min, max) straight from `kParameters[]`, plus the
+    /// discrete-ness implied by `kParameterIsBoolean|kParameterIsInteger` / enum values.
+    const DPF_TABLE: [(&str, &str, &str, f32, f32, f32, bool); 21] = [
+        ("ANTIALIASING", "ANTIALIASING", "%", 66.216, 0.0, 100.0, false),
+        ("PREGAIN", "INPUT", "dB", 0.0, -12.0, 12.0, false),
+        ("NETBYPASS", "NETBYPASS", "", 0.0, 0.0, 1.0, true),
+        ("EQBYPASS", "EQBYPASS", "", 0.0, 0.0, 1.0, true),
+        ("EQPOS", "EQPOS", "", 0.0, 0.0, 1.0, true),
+        ("BASS", "BASS", "dB", 0.0, -8.0, 8.0, false),
+        ("BFREQ", "BFREQ", "Hz", 305.0, 75.0, 600.0, false),
+        ("MID", "MID", "dB", 0.0, -8.0, 8.0, false),
+        ("MFREQ", "MFREQ", "Hz", 750.0, 150.0, 5000.0, false),
+        ("MIDQ", "MIDQ", "", 0.707, 0.2, 5.0, false),
+        ("MTYPE", "MTYPE", "", 0.0, 0.0, 1.0, true),
+        ("TREBLE", "TREBLE", "dB", 0.0, -8.0, 8.0, false),
+        ("TFREQ", "TFREQ", "Hz", 2000.0, 1000.0, 4000.0, false),
+        ("DEPTH", "DEPTH", "dB", 0.0, -8.0, 8.0, false),
+        ("PRESENCE", "PRESENCE", "dB", 0.0, -8.0, 8.0, false),
+        ("MASTER", "OUTPUT", "dB", 0.0, -15.0, 15.0, false),
+        ("CABSIMBYPASS", "CABSIMBYPASS", "", 0.0, 0.0, 1.0, true),
+        ("dpf_bypass", "Bypass", "", 0.0, 0.0, 1.0, true),
+        ("PARAM1", "PARAM1", "", 0.0, 0.0, 1.0, false),
+        ("PARAM2", "PARAM2", "", 0.0, 0.0, 1.0, false),
+        ("DCBLOCKER", "DCBLOCKER", "", 1.0, 0.0, 1.0, true),
+    ];
 
-// Enumeration values matching DPF exactly
+    #[test]
+    fn parameters_match_dpf_table() {
+        let params = AidaParams::default();
+        let map = params.param_map();
+        assert_eq!(map.len(), DPF_TABLE.len());
 
-static BYPASS_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "ON" },
-    ParameterEnumeration { value: 1.0, label: "OFF" },
-];
-
-static GLOBAL_BYPASS_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "PROCESSING" },
-    ParameterEnumeration { value: 1.0, label: "BYPASSED" },
-];
-
-static EQPOS_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "POST" },
-    ParameterEnumeration { value: 1.0, label: "PRE" },
-];
-
-static MTYPE_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "PEAK" },
-    ParameterEnumeration { value: 1.0, label: "BANDPASS" },
-];
-
-static DC_BLOCKER_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "OFF" },
-    ParameterEnumeration { value: 1.0, label: "ON" },
-];
-
-static MODEL_IN_SIZE_ENUM: &[ParameterEnumeration] = &[
-    ParameterEnumeration { value: 0.0, label: "ERROR" },
-    ParameterEnumeration { value: 1.0, label: "SNAPSHOT" },
-    ParameterEnumeration { value: 2.0, label: "WITH 1 PARAM" },
-    ParameterEnumeration { value: 3.0, label: "WITH 2 PARAMS" },
-];
-
-impl ParameterDef {
-    /// Check if this parameter is automatable (not output-only)
-    pub fn is_automatable(&self) -> bool {
-        !self.is_output
-    }
-
-    /// Get the CLAP parameter flags for this parameter
-    pub fn clap_flags(&self) -> u32 {
-        let mut flags = 0u32;
-        // clap_param_flags::CLAP_PARAM_IS_AUTOMATABLE = 1
-        if self.is_automatable() {
-            flags |= 1;
-        }
-        // clap_param_flags::CLAP_PARAM_IS_BYPASS = 8192 (for global bypass)
-        if self.index == ParameterIndex::GlobalBypass {
-            flags |= 8192;
-        }
-        // clap_param_flags::CLAP_PARAM_IS_HIDDEN = 16384 (for output-only meters)
-        if self.is_output {
-            flags |= 16384;
-        }
-        flags
-    }
-
-    /// Resolve an enum value by its index
-    pub fn get_enum(&self, index: u32) -> Option<&ParameterEnumeration> {
-        if self.enums.is_empty() {
-            return None;
-        }
-        self.enums.get(index as usize)
-    }
-
-    /// Get the total number of enum values
-    pub fn enum_count(&self) -> u32 {
-        self.enums.len() as u32
-    }
-
-    /// Convert value to human-readable string
-    pub fn value_to_string(&self, value: f64) -> String {
-        if !self.enums.is_empty() {
-            // Find the closest enum match
-            for (i, e) in self.enums.iter().enumerate() {
-                if (value - e.value).abs() < 0.01 {
-                    return e.label.to_string();
-                }
+        for ((id, ptr, _group), (sym, name, unit, def, min, max, discrete)) in
+            map.iter().zip(DPF_TABLE.iter())
+        {
+            assert_eq!(id, sym, "parameter order/ID");
+            // SAFETY: `params` outlives every use of `ptr`.
+            unsafe {
+                assert_eq!(ptr.name(), *name, "{sym}: name");
+                assert_eq!(ptr.unit().trim(), *unit, "{sym}: unit");
+                assert!((ptr.default_plain_value() - def).abs() < 1e-4, "{sym}: default");
+                assert!((ptr.preview_plain(0.0) - min).abs() < 1e-4, "{sym}: min");
+                assert!((ptr.preview_plain(1.0) - max).abs() < 1e-4, "{sym}: max");
+                assert_eq!(ptr.step_count() == Some(1), *discrete, "{sym}: discrete");
             }
         }
-        format!("{:.3}", value)
+        assert_eq!(
+            map.iter().map(|(id, ..)| id.as_str()).collect::<Vec<_>>(),
+            PARAMETER_IDS
+        );
     }
 
-    /// Convert EqPos parameter value to enum
-    pub fn eq_pos_from_value(value: f64) -> EqPos {
-        if value > 0.5 {
-            EqPos::Pre
-        } else {
-            EqPos::Post
-        }
+    #[test]
+    fn bypass_is_flagged_and_labelled() {
+        let params = AidaParams::default();
+        assert!(params.bypass.flags().contains(ParamFlags::BYPASS));
+        assert_eq!(params.bypass.normalized_value_to_string(0.0, false), "PROCESSING");
+        assert_eq!(params.bypass.normalized_value_to_string(1.0, false), "BYPASSED");
+        assert_eq!(params.antialiasing.normalized_value_to_string(0.0, false), "Off");
+        assert_eq!(params.eq_pos.normalized_value_to_string(0.0, false), "POST");
+        assert_eq!(params.eq_pos.normalized_value_to_string(1.0, false), "PRE");
+        assert_eq!(params.mid_type.normalized_value_to_string(0.0, false), "PEAK");
+        assert_eq!(params.mid_type.normalized_value_to_string(1.0, false), "BANDPASS");
     }
 
-    /// Convert MidType parameter value to enum
-    pub fn mid_type_from_value(value: f64) -> MidEqType {
-        if value > 0.5 {
-            MidEqType::Bandpass
-        } else {
-            MidEqType::Peak
-        }
+    #[test]
+    fn file_paths_round_trip_through_persisted_state() {
+        let params = AidaParams::default();
+        *params.model_file.write().unwrap() = String::from("C:/models/amp.json");
+        *params.cabinet_file.write().unwrap() = String::from("C:/irs/cab.wav");
+        let fields = params.serialize_fields();
+        assert!(fields.contains_key(STATE_KEY_MODEL));
+        assert!(fields.contains_key(STATE_KEY_CABINET));
+
+        let restored = AidaParams::default();
+        assert_eq!(*restored.model_file.read().unwrap(), STATE_DEFAULT_FILE);
+        restored.deserialize_fields(&fields);
+        assert_eq!(*restored.model_file.read().unwrap(), "C:/models/amp.json");
+        assert_eq!(*restored.cabinet_file.read().unwrap(), "C:/irs/cab.wav");
     }
-}
-
-/// Resolve parameter definition by index
-pub fn parameter_by_index(index: u32) -> Option<&'static ParameterDef> {
-    all_parameters().get(index as usize).map(|p| p)
-}
-
-/// Resolve parameter definition by CLAP ID
-pub fn parameter_by_clap_id(id: &str) -> Option<&'static ParameterDef> {
-    all_parameters().iter().find(|p| p.clap_id == id)
 }

@@ -3,20 +3,25 @@ name = "aidadx_plugin"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "VST3 and CLAP plugin backends for AIDA-X neural amp modeler"
+description = "VST3 and CLAP plugin backends for AIDA-X neural amp modeler (nih-plug)"
+license = "GPL-3.0-or-later"
 
 [lib]
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aidadx_core = { path = "../aidadx_core", features = ["candle"] }
-
-
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-log = "0.4"
+# Deliberately WITHOUT the `candle` feature by default; enable this crate's
+# `candle` feature to pass it through once neural inference compiles.
+aidadx_core = { path = "../aidadx_core" }
+# nih-plug is not on crates.io; pin an exact commit for reproducible builds.
+# Its VST3 bindings (vst3-sys) are GPLv3, compatible with AIDA-X (GPL-3.0-or-later).
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683", default-features = false }
 
 [features]
-default = ["clap"]
+default = ["clap", "vst3"]
+# Export the CLAP entry point (`clap_entry`).
 clap = []
-vst3 = []
+# Export the VST3 entry point (`GetPluginFactory`).
+vst3 = ["nih_plug/vst3"]
+# Pass-through: enable neural inference in aidadx_core.
+candle = ["aidadx_core/candle"]

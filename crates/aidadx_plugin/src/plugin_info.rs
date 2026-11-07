@@ -1,48 +1,32 @@
-/// Plugin metadata matching the DPF DistrhoPluginCommon.hpp definitions.
+//! Plugin metadata, from `src/DistrhoPluginCommon.hpp`.
 
-/// Unique plugin label (max 127 chars, used for host identification)
-pub const PLUGIN_LABEL: &str = "AIDA_X";
-
-/// Brand / manufacturer name
+/// `DISTRHO_PLUGIN_NAME`
+pub const PLUGIN_NAME: &str = "AIDA-X";
+/// `DISTRHO_PLUGIN_BRAND`
 pub const PLUGIN_BRAND: &str = "AIDA DSP";
-
-/// Unique plugin ID ("aida")
-pub const PLUGIN_UNIQUE_ID: &str = "aida";
-
-/// Plugin URI (used by CLAP, LV2)
-pub const PLUGIN_URI: &str =
-    "http://aidadsp.cc/plugins/aidadsp-bundle/rt-neural-loader";
-
-/// Plugin version string
-pub const PLUGIN_VERSION: &str = "1.1.0";
-
-/// Plugin description
+/// DPF plugin label (`getLabel()`).
+pub const PLUGIN_LABEL: &str = "AIDA_X";
+/// `DISTRHO_PLUGIN_URI` (LV2 URI; also used as the homepage/manual link).
+pub const PLUGIN_URI: &str = "http://aidadsp.cc/plugins/aidadsp-bundle/rt-neural-loader";
+/// `DISTRHO_PLUGIN_CLAP_ID`
+pub const CLAP_ID: &str = "cc.aidadsp.rt-neural-loader";
+/// Plugin description (`getDescription()`).
 pub const PLUGIN_DESCRIPTION: &str =
     "Simple loader for neural models using RTNeural inference engine.";
-
-/// Plugin author / homepage
+/// `getHomePage()`
 pub const PLUGIN_HOMEPAGE: &str = "https://aidadsp.github.io/";
+/// Support / issue tracker.
+pub const PLUGIN_SUPPORT_URL: &str = "https://github.com/AidaDSP/AIDA-X/issues";
 
-/// Plugin license
-pub const PLUGIN_LICENSE: &str = "GPL-3.0-or-later";
+/// VST3 class ID.
+///
+/// TODO(compat): DPF derives its VST3 class UID from `DISTRHO_PLUGIN_UNIQUE_ID` (`aida`)
+/// with `DPF_VST3_DONT_USE_BRAND_ID`; reproduce that exact 16-byte UID (the DPF sources
+/// are not vendored in this repository) so hosts treat the Rust build as a drop-in
+/// replacement for existing projects. Until then this is a distinct, stable ID.
+pub const VST3_CLASS_ID: [u8; 16] = *b"AidaDspAidaXRust";
 
-/// CLAP vendor name
-pub const CLAP_VENDOR: &str = "AIDA DSP";
-
-/// CLAP features for audio-effect plugins
-pub const CLAP_FEATURES: &[&str] = &["audio-effect", "multi-effects", "mono"];
-
-/// VST3 categories (pipe-separated)
-pub const VST3_CATEGORIES: &str = "Fx|Dynamics|Mono";
-
-/// Default model filename
+/// `kDefaultModelName`: bundled default neural model.
 pub const DEFAULT_MODEL: &str = "tw40_california_clean.json";
-
-/// Default cabinet IR filename
+/// `kDefaultCabinetName`: bundled default cabinet IR.
 pub const DEFAULT_CABINET: &str = "V30-P2-audix-i5.wav";
-
-/// Plugin sample rate
-pub const PLUGIN_SAMPLE_RATE: f64 = 48_000.0;
-
-/// Plugin buffer size
-pub const PLUGIN_BUFFER_SIZE: u32 = 512;
