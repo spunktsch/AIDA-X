@@ -1,5 +1,13 @@
 {
-  "ticket_counter": 15,
-  "last_updated": "2026-11-01T22:42:00Z",
-  "folders": ["dsp", "ui", "plugin", "mobile", "web", "ci", "misc"]
+  "ticket_counter": 22,
+  "last_updated": "2026-11-07T12:00:00Z",
+  "folders": [
+    "dsp",
+    "ui",
+    "plugin",
+    "mobile",
+    "web",
+    "ci",
+    "misc"
+  ]
 }
