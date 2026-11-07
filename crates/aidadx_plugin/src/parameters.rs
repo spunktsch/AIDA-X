@@ -2,17 +2,36 @@
 //! `src/DistrhoPluginCommon.hpp` and `initParameter()`/`initState()` in
 //! `src/aidadsp-plugin.cpp`.
 //!
-//! Parameter IDs are the DPF *symbols* (e.g. `PREGAIN`, `MASTER`, `dpf_bypass`) so that
-//! automation lanes and presets keep a stable, recognisable identity. Fields are declared
-//! in the C++ enum order (`kParameterINLPF` .. `kParameterDCBLOCKER`), which nih-plug uses
-//! as the host-facing order.
+//! Fields are declared in the C++ enum order (`kParameterINLPF` .. `kParameterDCBLOCKER`),
+//! which nih-plug uses as the host-facing order.
+//!
+//! # Host parameter IDs (DPF compatibility, TICKET-020)
+//!
+//! DPF does not hash anything: it exposes parameter *indices* as host IDs.
+//!
+//! - CLAP (`DistrhoPluginCLAP.cpp`, `getParameterInfo`): `info->id = index`.
+//! - VST3 (`DistrhoPluginVST3.cpp`, `getParameterInfo`): `info->param_id = rindex`, where
+//!   the first `kVst3InternalParameterCount` IDs are DPF-internal. AIDA-X has a UI and no
+//!   direct access, so `DPF_VST3_USES_SEPARATE_CONTROLLER` is 1 and the internal IDs are
+//!   `0 = Buffer Size`, `1 = Sample Rate` (hidden, read-only); no latency/programs/MIDI.
+//!   Plugin parameter `index` is therefore VST3 ID `index + 2`.
+//!
+//! nih-plug derives host IDs from the string ID with a fixed, non-overridable hash
+//! (`hash_param_id` in `src/wrapper/util.rs`, mirrored in [`nih_plug_param_hash`]). That hash
+//! is invertible, so instead of forking nih-plug each string ID is *constructed* such that it
+//! hashes to the DPF ID: `"<DPF symbol>#"` followed by a 7-character suffix solved for the
+//! target hash (see [`dpf_compatible_param_id`]). Because CLAP and VST3 need different
+//! targets, the ID scheme is chosen per exported plugin type ([`ParamIdScheme`]).
 //!
 //! The three DPF *output* parameters (`ModelInSize`, `MeterIn`, `MeterOut`) have no
 //! equivalent in nih-plug (neither the CLAP nor the VST3 wrapper supports read-only
-//! output parameters), so they are exposed through [`crate::PluginOutputs`] instead.
+//! output parameters), so they are exposed through [`crate::PluginOutputs`] instead. Their
+//! DPF IDs (CLAP 21..=23, VST3 23..=25) are simply left unused.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use nih_plug::params::persist::{self, PersistentField};
 use nih_plug::prelude::*;
 
 /// DPF state key for the neural model file (`kStateModelFile`).
@@ -44,8 +63,9 @@ pub enum MidType {
     Bandpass,
 }
 
-/// Host parameter IDs in C++ `enum Parameters` order (input parameters only).
-pub const PARAMETER_IDS: [&str; 21] = [
+/// DPF parameter *symbols* in C++ `enum Parameters` order (input parameters only). The
+/// position in this table is the DPF parameter index.
+pub const PARAMETER_SYMBOLS: [&str; 21] = [
     "ANTIALIASING",
     "PREGAIN",
     "NETBYPASS",
@@ -69,79 +89,165 @@ pub const PARAMETER_IDS: [&str; 21] = [
     "DCBLOCKER",
 ];
 
-#[derive(Params)]
+/// Number of DPF-internal VST3 parameters in front of the plugin parameters for AIDA-X
+/// (`kVst3InternalParameterCount`: buffer size + sample rate, see the module docs).
+pub const DPF_VST3_INTERNAL_PARAMETER_COUNT: u32 = 2;
+
+/// Which host-ID layout to reproduce. Selected per exported plugin type, because the same
+/// string ID is hashed identically by nih-plug's CLAP and VST3 wrappers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParamIdScheme {
+    /// DPF CLAP: host ID = DPF parameter index.
+    Clap,
+    /// DPF VST3: host ID = DPF parameter index + [`DPF_VST3_INTERNAL_PARAMETER_COUNT`].
+    Vst3,
+}
+
+impl ParamIdScheme {
+    /// The host-facing ID DPF uses for the parameter at `index` (an index into
+    /// [`PARAMETER_SYMBOLS`]).
+    pub const fn dpf_host_id(self, index: u32) -> u32 {
+        match self {
+            Self::Clap => index,
+            Self::Vst3 => index + DPF_VST3_INTERNAL_PARAMETER_COUNT,
+        }
+    }
+
+    /// The nih-plug string IDs for all input parameters, in [`PARAMETER_SYMBOLS`] order.
+    pub fn string_ids(self) -> [String; PARAMETER_SYMBOLS.len()] {
+        std::array::from_fn(|i| {
+            dpf_compatible_param_id(PARAMETER_SYMBOLS[i], self.dpf_host_id(i as u32))
+        })
+    }
+}
+
+/// nih-plug masks the top bit (reserved for host parameters in VST3).
+const HASH_MASK: u32 = !(1 << 31);
+/// Length of the solved suffix. `31^7 > 2^31`, so 7 base-31 digits reach every hash.
+const SUFFIX_LEN: usize = 7;
+/// Suffix digits are the 31 consecutive ASCII characters `'0'..='N'`, so a digit `d` adds
+/// exactly `b'0' + d` to the polynomial hash.
+const SUFFIX_FIRST_CHAR: u8 = b'0';
+
+/// Unmasked polynomial (Rabin) hash, `h = h * 31 + byte`, wrapping.
+const fn raw_hash(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash = hash.wrapping_mul(31).wrapping_add(bytes[i] as u32);
+        i += 1;
+    }
+    hash
+}
+
+/// Exact mirror of nih-plug's private `nih_plug::wrapper::util::hash_param_id` at the
+/// pinned revision (`de42101`), which both the CLAP and VST3 wrappers use to turn a string
+/// parameter ID into the host-facing `u32` ID.
+pub const fn nih_plug_param_hash(id: &str) -> u32 {
+    raw_hash(id.as_bytes()) & HASH_MASK
+}
+
+/// Build a readable string parameter ID for `symbol` whose [`nih_plug_param_hash`] is
+/// exactly `target` (`target < 2^31`).
+///
+/// With prefix `p = "<symbol>#"` and suffix digits `d_0..d_6` (characters `'0' + d_i`):
+///
+/// ```text
+/// hash = raw(p) * 31^7 + sum_i ('0' + d_i) * 31^(6-i)            (mod 2^32)
+///      = raw(p) * 31^7 + raw("0000000") + D,   D = sum_i d_i * 31^(6-i)
+/// ```
+///
+/// so `D = target - raw(p) * 31^7 - raw("0000000") (mod 2^31)`, written in base 31. Any
+/// `D < 2^31 < 31^7` fits in 7 digits, and the masked hash then equals `target`.
+///
+/// The result is part of nih-plug's saved state (parameter keys), so this construction
+/// must never change.
+pub fn dpf_compatible_param_id(symbol: &str, target: u32) -> String {
+    assert!(
+        target <= HASH_MASK,
+        "VST3/nih-plug parameter IDs are 31 bit"
+    );
+
+    let mut id = String::with_capacity(symbol.len() + 1 + SUFFIX_LEN);
+    id.push_str(symbol);
+    id.push('#');
+
+    let pow = 31u32.wrapping_pow(SUFFIX_LEN as u32);
+    let base = raw_hash(&[SUFFIX_FIRST_CHAR; SUFFIX_LEN]);
+    let mut remaining = target
+        .wrapping_sub(raw_hash(id.as_bytes()).wrapping_mul(pow))
+        .wrapping_sub(base)
+        & HASH_MASK;
+
+    let mut digits = [SUFFIX_FIRST_CHAR; SUFFIX_LEN];
+    for digit in digits.iter_mut().rev() {
+        *digit = SUFFIX_FIRST_CHAR + (remaining % 31) as u8;
+        remaining /= 31;
+    }
+    debug_assert_eq!(remaining, 0);
+    id.extend(digits.iter().map(|&d| d as char));
+
+    debug_assert_eq!(nih_plug_param_hash(&id), target);
+    id
+}
+
+/// All AIDA-X host parameters plus the persisted file paths.
+///
+/// `Params` is implemented by hand (not derived) so that the string IDs can depend on the
+/// [`ParamIdScheme`]; see the module docs.
 pub struct AidaParams {
+    /// String IDs handed to nih-plug, in [`PARAMETER_SYMBOLS`] order.
+    ids: [String; PARAMETER_SYMBOLS.len()],
+    scheme: ParamIdScheme,
+
     /// `kParameterINLPF`: input anti-aliasing low-pass amount. 0 disables the filter.
-    #[id = "ANTIALIASING"]
     pub antialiasing: FloatParam,
     /// `kParameterINLEVEL`: input gain.
-    #[id = "PREGAIN"]
     pub input: FloatParam,
     /// `kParameterNETBYPASS`: bypass the neural model stage.
-    #[id = "NETBYPASS"]
     pub net_bypass: BoolParam,
     /// `kParameterEQBYPASS`: bypass the tone stack.
-    #[id = "EQBYPASS"]
     pub eq_bypass: BoolParam,
     /// `kParameterEQPOS`: tone stack before or after the model.
-    #[id = "EQPOS"]
     pub eq_pos: EnumParam<EqPosition>,
     /// `kParameterBASSGAIN`
-    #[id = "BASS"]
     pub bass: FloatParam,
     /// `kParameterBASSFREQ`
-    #[id = "BFREQ"]
     pub bass_freq: FloatParam,
     /// `kParameterMIDGAIN`
-    #[id = "MID"]
     pub mid: FloatParam,
     /// `kParameterMIDFREQ`
-    #[id = "MFREQ"]
     pub mid_freq: FloatParam,
     /// `kParameterMIDQ`
-    #[id = "MIDQ"]
     pub mid_q: FloatParam,
     /// `kParameterMTYPE`
-    #[id = "MTYPE"]
     pub mid_type: EnumParam<MidType>,
     /// `kParameterTREBLEGAIN`
-    #[id = "TREBLE"]
     pub treble: FloatParam,
     /// `kParameterTREBLEFREQ`
-    #[id = "TFREQ"]
     pub treble_freq: FloatParam,
     /// `kParameterDEPTH`
-    #[id = "DEPTH"]
     pub depth: FloatParam,
     /// `kParameterPRESENCE`
-    #[id = "PRESENCE"]
     pub presence: FloatParam,
     /// `kParameterOUTLEVEL`: output gain.
-    #[id = "MASTER"]
     pub output: FloatParam,
     /// `kParameterCABSIMBYPASS`
-    #[id = "CABSIMBYPASS"]
     pub cabsim_bypass: BoolParam,
     /// `kParameterGLOBALBYPASS` (designation: bypass).
-    #[id = "dpf_bypass"]
     pub bypass: BoolParam,
     /// `kParameterPARAM1`: first conditioning input for parametric models.
-    #[id = "PARAM1"]
     pub param1: FloatParam,
     /// `kParameterPARAM2`: second conditioning input for parametric models.
-    #[id = "PARAM2"]
     pub param2: FloatParam,
     /// `kParameterDCBLOCKER`
-    #[id = "DCBLOCKER"]
     pub dc_blocker: BoolParam,
 
     /// `kStateModelFile` ("json"): absolute path of the loaded `.json` model, or
     /// [`STATE_DEFAULT_FILE`] / empty for the bundled default.
-    #[persist = "json"]
     pub model_file: Arc<RwLock<String>>,
     /// `kStateImpulseFile` ("cabinet"): absolute path of the loaded `.wav`/`.flac` IR, or
     /// [`STATE_DEFAULT_FILE`] / empty for the bundled default.
-    #[persist = "cabinet"]
     pub cabinet_file: Arc<RwLock<String>>,
 }
 
@@ -165,8 +271,19 @@ fn on_off(name: &str, default: bool) -> BoolParam {
 }
 
 impl Default for AidaParams {
+    /// The CLAP layout (host ID = DPF index). The plugin types use [`AidaParams::new`].
     fn default() -> Self {
+        Self::new(ParamIdScheme::Clap)
+    }
+}
+
+impl AidaParams {
+    /// Create the parameters with DPF-compatible host IDs for `scheme`.
+    pub fn new(scheme: ParamIdScheme) -> Self {
         Self {
+            ids: scheme.string_ids(),
+            scheme,
+
             // Value 0 is labelled "Off" in initParameter().
             antialiasing: linear("ANTIALIASING", 66.216, 0.0, 100.0, " %").with_value_to_string(
                 Arc::new(|v| {
@@ -185,9 +302,8 @@ impl Default for AidaParams {
             bass_freq: hz("BFREQ", 305.0, 75.0, 600.0),
             mid: db("MID", -8.0, 8.0),
             mid_freq: hz("MFREQ", 750.0, 150.0, 5000.0),
-            mid_q: linear("MIDQ", 0.707, 0.2, 5.0, "").with_value_to_string(
-                formatters::v2s_f32_rounded(3),
-            ),
+            mid_q: linear("MIDQ", 0.707, 0.2, 5.0, "")
+                .with_value_to_string(formatters::v2s_f32_rounded(3)),
             mid_type: EnumParam::new("MTYPE", MidType::Peak),
             treble: db("TREBLE", -8.0, 8.0),
             treble_freq: hz("TFREQ", 2000.0, 1000.0, 4000.0),
@@ -212,6 +328,105 @@ impl Default for AidaParams {
 
             model_file: Arc::new(RwLock::new(String::from(STATE_DEFAULT_FILE))),
             cabinet_file: Arc::new(RwLock::new(String::from(STATE_DEFAULT_FILE))),
+        }
+    }
+
+    /// The host-ID layout these parameters reproduce.
+    pub fn scheme(&self) -> ParamIdScheme {
+        self.scheme
+    }
+
+    /// The nih-plug string IDs, in [`PARAMETER_SYMBOLS`] order.
+    pub fn string_ids(&self) -> &[String; PARAMETER_SYMBOLS.len()] {
+        &self.ids
+    }
+
+    /// Parameter pointers in [`PARAMETER_SYMBOLS`] order.
+    fn param_ptrs(&self) -> [ParamPtr; PARAMETER_SYMBOLS.len()] {
+        [
+            self.antialiasing.as_ptr(),
+            self.input.as_ptr(),
+            self.net_bypass.as_ptr(),
+            self.eq_bypass.as_ptr(),
+            self.eq_pos.as_ptr(),
+            self.bass.as_ptr(),
+            self.bass_freq.as_ptr(),
+            self.mid.as_ptr(),
+            self.mid_freq.as_ptr(),
+            self.mid_q.as_ptr(),
+            self.mid_type.as_ptr(),
+            self.treble.as_ptr(),
+            self.treble_freq.as_ptr(),
+            self.depth.as_ptr(),
+            self.presence.as_ptr(),
+            self.output.as_ptr(),
+            self.cabsim_bypass.as_ptr(),
+            self.bypass.as_ptr(),
+            self.param1.as_ptr(),
+            self.param2.as_ptr(),
+            self.dc_blocker.as_ptr(),
+        ]
+    }
+
+    /// Persisted (`#[persist]`-style) fields under their DPF state keys.
+    fn persisted_fields(&self) -> [(&'static str, &Arc<RwLock<String>>); 2] {
+        [
+            (STATE_KEY_MODEL, &self.model_file),
+            (STATE_KEY_CABINET, &self.cabinet_file),
+        ]
+    }
+}
+
+/// Rename parameter keys of a nih-plug state saved by an earlier Rust build (which used the
+/// bare DPF symbols as string IDs) to the IDs of `scheme`. Unknown keys are left alone.
+pub fn migrate_symbol_keys<V>(params: &mut BTreeMap<String, V>, scheme: ParamIdScheme) {
+    for (symbol, id) in PARAMETER_SYMBOLS.iter().zip(scheme.string_ids()) {
+        if !params.contains_key(&id) {
+            if let Some(value) = params.remove(*symbol) {
+                params.insert(id, value);
+            }
+        }
+    }
+}
+
+// SAFETY: every `ParamPtr` points into `self`, which nih-plug keeps alive (behind an `Arc`)
+// for as long as it uses the pointers; the same contract `#[derive(Params)]` relies on.
+unsafe impl Params for AidaParams {
+    fn param_map(&self) -> Vec<(String, ParamPtr, String)> {
+        self.ids
+            .iter()
+            .zip(self.param_ptrs())
+            .map(|(id, ptr)| (id.clone(), ptr, String::new()))
+            .collect()
+    }
+
+    /// Same encoding as the `#[persist = "..."]` derive: each field as its own JSON string.
+    fn serialize_fields(&self) -> BTreeMap<String, String> {
+        let mut serialized = BTreeMap::new();
+        for (key, field) in self.persisted_fields() {
+            match PersistentField::map(field, persist::serialize_field) {
+                Ok(data) => {
+                    serialized.insert(String::from(key), data);
+                }
+                Err(err) => {
+                    nih_debug_assert_failure!("Could not serialize '{}': {}", key, err);
+                }
+            }
+        }
+        serialized
+    }
+
+    fn deserialize_fields(&self, serialized: &BTreeMap<String, String>) {
+        for (key, field) in self.persisted_fields() {
+            let Some(data) = serialized.get(key) else {
+                continue;
+            };
+            match persist::deserialize_field::<String>(data) {
+                Ok(value) => PersistentField::set(field, value),
+                Err(err) => {
+                    nih_debug_assert_failure!("Could not deserialize '{}': {}", key, err);
+                }
+            }
         }
     }
 }
@@ -287,7 +502,15 @@ mod tests {
     /// (symbol, name, unit, default, min, max) straight from `kParameters[]`, plus the
     /// discrete-ness implied by `kParameterIsBoolean|kParameterIsInteger` / enum values.
     const DPF_TABLE: [(&str, &str, &str, f32, f32, f32, bool); 21] = [
-        ("ANTIALIASING", "ANTIALIASING", "%", 66.216, 0.0, 100.0, false),
+        (
+            "ANTIALIASING",
+            "ANTIALIASING",
+            "%",
+            66.216,
+            0.0,
+            100.0,
+            false,
+        ),
         ("PREGAIN", "INPUT", "dB", 0.0, -12.0, 12.0, false),
         ("NETBYPASS", "NETBYPASS", "", 0.0, 0.0, 1.0, true),
         ("EQBYPASS", "EQBYPASS", "", 0.0, 0.0, 1.0, true),
@@ -319,34 +542,134 @@ mod tests {
         for ((id, ptr, _group), (sym, name, unit, def, min, max, discrete)) in
             map.iter().zip(DPF_TABLE.iter())
         {
-            assert_eq!(id, sym, "parameter order/ID");
+            assert_eq!(
+                id.split_once('#').map(|(s, _)| s),
+                Some(*sym),
+                "parameter order/ID"
+            );
             // SAFETY: `params` outlives every use of `ptr`.
             unsafe {
                 assert_eq!(ptr.name(), *name, "{sym}: name");
                 assert_eq!(ptr.unit().trim(), *unit, "{sym}: unit");
-                assert!((ptr.default_plain_value() - def).abs() < 1e-4, "{sym}: default");
+                assert!(
+                    (ptr.default_plain_value() - def).abs() < 1e-4,
+                    "{sym}: default"
+                );
                 assert!((ptr.preview_plain(0.0) - min).abs() < 1e-4, "{sym}: min");
                 assert!((ptr.preview_plain(1.0) - max).abs() < 1e-4, "{sym}: max");
                 assert_eq!(ptr.step_count() == Some(1), *discrete, "{sym}: discrete");
             }
         }
         assert_eq!(
-            map.iter().map(|(id, ..)| id.as_str()).collect::<Vec<_>>(),
-            PARAMETER_IDS
+            DPF_TABLE.iter().map(|row| row.0).collect::<Vec<_>>(),
+            PARAMETER_SYMBOLS
         );
+    }
+
+    /// DPF host IDs: CLAP `info->id = index`; VST3 `info->param_id = rindex` with
+    /// `rindex = index + kVst3InternalParameterCount` (2 for AIDA-X).
+    #[test]
+    fn host_ids_match_dpf_indices() {
+        for (scheme, offset) in [(ParamIdScheme::Clap, 0u32), (ParamIdScheme::Vst3, 2)] {
+            let params = AidaParams::new(scheme);
+            let map = params.param_map();
+            assert_eq!(map.len(), PARAMETER_SYMBOLS.len());
+            for (index, (id, ..)) in map.iter().enumerate() {
+                assert_eq!(
+                    nih_plug_param_hash(id),
+                    index as u32 + offset,
+                    "{scheme:?} {id}"
+                );
+            }
+        }
+        // Spot checks: bypass (kParameterGLOBALBYPASS = 17), first and last parameter.
+        assert_eq!(
+            nih_plug_param_hash(&ParamIdScheme::Vst3.string_ids()[17]),
+            19
+        );
+        assert_eq!(nih_plug_param_hash(&ParamIdScheme::Clap.string_ids()[0]), 0);
+        assert_eq!(
+            nih_plug_param_hash(&ParamIdScheme::Clap.string_ids()[20]),
+            20
+        );
+    }
+
+    /// The string IDs are stored in nih-plug state; pin the construction.
+    #[test]
+    fn string_ids_are_stable() {
+        let clap = ParamIdScheme::Clap.string_ids();
+        let vst3 = ParamIdScheme::Vst3.string_ids();
+        assert_eq!(clap[1], PINNED_CLAP_PREGAIN);
+        assert_eq!(vst3[17], PINNED_VST3_BYPASS);
+        for id in clap.iter().chain(vst3.iter()) {
+            assert!(
+                id.is_ascii() && !id.contains('"') && !id.contains('\\'),
+                "{id}"
+            );
+        }
+    }
+
+    const PINNED_CLAP_PREGAIN: &str = "PREGAIN#08NL4:N";
+    const PINNED_VST3_BYPASS: &str = "dpf_bypass#227=;E9";
+
+    #[test]
+    fn hash_mirror_matches_nih_plug_definition() {
+        // h = h * 31 + byte, top bit cleared (see nih-plug src/wrapper/util.rs).
+        assert_eq!(nih_plug_param_hash(""), 0);
+        assert_eq!(nih_plug_param_hash("a"), 97);
+        assert_eq!(nih_plug_param_hash("ab"), 97 * 31 + 98);
+        // Wrapping + masking: 31^7 overflows u32.
+        let long = "zzzzzzzzzzzz";
+        let mut h: u64 = 0;
+        for b in long.bytes() {
+            h = (h * 31 + b as u64) % (1 << 32);
+        }
+        assert_eq!(nih_plug_param_hash(long), (h as u32) & !(1 << 31));
+        for target in [0, 1, 2, 22, 0x7fff_ffff, 123_456_789] {
+            assert_eq!(
+                nih_plug_param_hash(&dpf_compatible_param_id("X", target)),
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_keyed_state_is_migrated() {
+        let mut map = BTreeMap::new();
+        map.insert(String::from("PREGAIN"), 3.0f32);
+        map.insert(String::from("unknown"), 1.0f32);
+        migrate_symbol_keys(&mut map, ParamIdScheme::Vst3);
+        assert_eq!(map.get(&ParamIdScheme::Vst3.string_ids()[1]), Some(&3.0));
+        assert!(!map.contains_key("PREGAIN"));
+        assert!(map.contains_key("unknown"));
     }
 
     #[test]
     fn bypass_is_flagged_and_labelled() {
         let params = AidaParams::default();
         assert!(params.bypass.flags().contains(ParamFlags::BYPASS));
-        assert_eq!(params.bypass.normalized_value_to_string(0.0, false), "PROCESSING");
-        assert_eq!(params.bypass.normalized_value_to_string(1.0, false), "BYPASSED");
-        assert_eq!(params.antialiasing.normalized_value_to_string(0.0, false), "Off");
+        assert_eq!(
+            params.bypass.normalized_value_to_string(0.0, false),
+            "PROCESSING"
+        );
+        assert_eq!(
+            params.bypass.normalized_value_to_string(1.0, false),
+            "BYPASSED"
+        );
+        assert_eq!(
+            params.antialiasing.normalized_value_to_string(0.0, false),
+            "Off"
+        );
         assert_eq!(params.eq_pos.normalized_value_to_string(0.0, false), "POST");
         assert_eq!(params.eq_pos.normalized_value_to_string(1.0, false), "PRE");
-        assert_eq!(params.mid_type.normalized_value_to_string(0.0, false), "PEAK");
-        assert_eq!(params.mid_type.normalized_value_to_string(1.0, false), "BANDPASS");
+        assert_eq!(
+            params.mid_type.normalized_value_to_string(0.0, false),
+            "PEAK"
+        );
+        assert_eq!(
+            params.mid_type.normalized_value_to_string(1.0, false),
+            "BANDPASS"
+        );
     }
 
     #[test]
