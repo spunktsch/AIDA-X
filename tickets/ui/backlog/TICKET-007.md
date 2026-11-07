@@ -29,3 +29,10 @@ Port all UI widgets from `src/Widgets.hpp` to egui. Each widget must support mou
 
 ## Audit 2026-11-07
 Branch `ticket-007-interactive-widgets` (commit 87877ac) changes the **C++/DPF** code (src/wgpu-egui/Widgets.hpp etc.) instead of the Rust crates required by docs/PRD.md. Not integrated; branch kept for reference. Acceptance criteria reset — must be re-implemented in Rust.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

@@ -17,7 +17,7 @@ Port the biquad filter cascade from `src/Biquad.h`/`src/Biquad.cpp` to `aidadx_c
 - [x] `BiquadCascade` struct that chains multiple filters
 - [ ] SIMD-safe processing using `rustfft` vectorization or inline assembly
 - [x] Unit tests for each filter type (sine sweep, impulse response)
-- [ ] Matches C++ output within floating-point tolerance (1e-5)
+- [x] Matches C++ output within floating-point tolerance (1e-5) — bit-exact in 120 golden records (TICKET-022)
 - [x] `AidaToneControl` state machine ported (eq_pos, mid_type, smoothers)
 
 ## Checklist
@@ -36,3 +36,6 @@ Port the biquad filter cascade from `src/Biquad.h`/`src/Biquad.cpp` to `aidadx_c
 ## Audit 2026-11-07
 Integrated on `integration/rust-core` (commits 4e7cde4, 5379502). Original commit b3ab656 had 14 test compile errors and 7 failing tests; root causes: inverted exponential-smoother coefficient, fixed-step linear smoother, zeroed CascadeParameters defaults (NaN), per-block instead of per-sample gain ramp, DC blocker default off. Now ported from DPF `ValueSmoother.hpp` / `aidadsp-plugin.cpp`; 46 biquad tests pass.
 Not met: no SIMD path; no numeric comparison against real C++ output (only formula-level verification).
+
+## Review 2026-11-07
+Only SIMD remains open; not needed for performance so far (whole plugin chain ~2 % CPU at 128 samples, TICKET-017).

@@ -28,3 +28,10 @@ Add Apple Audio Unit and LV2 plugin format support. AU for macOS native host int
 
 ## Audit 2026-11-07
 Branch `ticket-009-au-lv2-backends` (commit 3263d88) changes the **C++/DPF** code (only a C header src/aidadx-lv2-plugin.h + Info.plist) instead of the Rust crates required by docs/PRD.md. Not integrated; branch kept for reference. Acceptance criteria reset — must be re-implemented in Rust.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

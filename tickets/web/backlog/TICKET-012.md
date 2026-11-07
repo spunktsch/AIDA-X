@@ -4,7 +4,7 @@ status: backlog
 assignee:
 priority: medium
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement WebAssembly (WASM) target with WebGPU rendering
@@ -28,3 +28,10 @@ Port AIDA-X to the web via WebAssembly. Uses egui compiled to WASM + wgpu WebGPU
 - SIMD: WebAssembly SIMD instruction set available in modern browsers (-msimd128)
 - No file system access: models/IRs must be loaded as typed arrays from user upload
 - MOD platform variant has special constraints (no keyboard/mouse wheel input)
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

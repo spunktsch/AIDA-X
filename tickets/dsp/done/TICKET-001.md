@@ -27,3 +27,10 @@ Initialize the Rust monorepo structure. The workspace root Cargo.toml and the fi
 
 ## Audit 2026-11-07
 Superseded by consolidation commit 1a58a36 on `integration/rust-core` (workspace on `crates/` layout). Original branch `ticket-001-rust-workspace` used a root-level `aidadx_*/` layout with stub modules only; not merged.
+
+## Checklist
+- [x] Code implemented (superseded by consolidation commit 1a58a36)
+- [ ] Tests written
+- [x] Self-review passed
+- [ ] PR created
+- [ ] Merged

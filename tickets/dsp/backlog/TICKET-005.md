@@ -31,3 +31,13 @@ Wire together biquad, convolver, and neural model into a single processing graph
 
 ## Audit 2026-11-07
 Branch `ticket-005-audio-pipeline` (commit acadde0) changes the **C++/DPF** code (refactor of src/aidadsp-plugin.cpp) instead of the Rust crates required by docs/PRD.md. Not integrated; branch kept for reference. Acceptance criteria reset — must be re-implemented in Rust.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged
+
+## Review 2026-11-07
+Largely implemented in `crates/aidadx_plugin/src/audio.rs` (`AidaEngine`, TICKET-008/017): full chain incl. model + cabinet, exponential/linear smoothing, 0.25 s bypass crossfade, stereo mirror, peak meters (`PluginOutputs`), no-alloc integration test. Open: chain lives in the plugin crate, not as reusable `aidadx_core::pipeline` (needed by standalone TICKET-010 / iOS TICKET-011); 21 of 24 params as host params (3 DPF output params via `PluginOutputs`). Acceptance criteria left unticked until moved to core.

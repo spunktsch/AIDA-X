@@ -83,3 +83,14 @@ Risks for the first CI run: validator URLs/asset names in `scripts/validate-plug
 unverified (non-blocking); pluginval on Linux may need more X/audio libs than xvfb; both
 `build.yml` and `rust.yml` publish to the same GitHub release on `v*` tags; MSRV
 (`rust-version = 1.75`) is not tested, only stable.
+
+## Checklist
+- [x] Code implemented
+- [ ] Tests written
+- [x] Self-review passed
+- [ ] PR created
+- [ ] Merged
+
+## Review 2026-11-07
+First CI run (push of `integration/rust-core`, run 42407904841): clippy, linux-x64, linux-arm64, windows-x64 **green** (tests + bundle + upload). macos-arm64/macos-x64 **failed to start**: runner image `macos-14` no longer supported -> switched to `macos-15`. `validate` and `release` were skipped because `build` was not fully green; validators therefore still never ran. Node 20 deprecation warning on `actions/checkout@v4`.
+The C++ `build.yml` is broken independently of this branch (no C++ inputs changed): retired runners `ubuntu-20.04`/`macos-13` never start, win64 fails in `dpf-cmake-action` -> TICKET-026.

@@ -31,3 +31,10 @@ Set up hardware-accelerated rendering. The desktop UI uses egui with wgpu backen
 
 ## Audit 2026-11-07
 Branch `ticket-006-wgpu-egui-backend` (commit b2c1a9c) changes the **C++/DPF** code (src/wgpu-egui/*.cpp + egui/wgpu-native submodules) instead of the Rust crates required by docs/PRD.md. Not integrated; branch kept for reference. Acceptance criteria reset — must be re-implemented in Rust.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

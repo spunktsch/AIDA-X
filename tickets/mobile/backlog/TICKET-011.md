@@ -31,3 +31,10 @@ Create the iOS deployment targets: an AUv3 plugin for use in hosts like Cubasis/
 
 ## Audit 2026-11-07
 Worktree `ticket-011-ios-auv3` was created but contains no work. Blocked on aidadx_core pipeline + aidadx_plugin.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

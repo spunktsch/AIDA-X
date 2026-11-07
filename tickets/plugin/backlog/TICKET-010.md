@@ -31,3 +31,10 @@ Build a standalone AIDA-X desktop application with embedded UI window, audio dev
 
 ## Audit 2026-11-07
 Work in worktree `ticket-010-standalone-app` is **uncommitted**: `standalone/` crate (Rust egui/eframe + cpal + rfd UI) calling a C++ DSP engine (`standalone/src/dsp/engine.cpp`) over C FFI, plus edits to CMakeLists.txt, build.yml, src/DistrhoPluginCommon.hpp. Never produced a binary. A duplicate of this ticket in `.kilo/tickets/` had all boxes checked — that was not accurate and was removed. Hybrid C++ engine conflicts with PRD; re-implement on `aidadx_core` once pipeline (TICKET-005) exists.
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged

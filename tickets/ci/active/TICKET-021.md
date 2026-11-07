@@ -90,3 +90,6 @@ Findings that are upstream nih-plug behaviour (not fixed, document if validators
 - [x] Self-review passed
 - [ ] PR created
 - [ ] Merged
+
+## Review 2026-11-07
+First CI run: `validate` job skipped (macOS build jobs failed to start, see TICKET-013). Validators have still never run; next CI run after the macOS runner fix should execute them on linux-x64 and windows-x64.

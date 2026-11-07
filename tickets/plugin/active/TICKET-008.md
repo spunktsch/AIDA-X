@@ -16,7 +16,7 @@ Create plugin entry points for VST3 and CLAP formats. The core audio pipeline fr
 - [x] `aidadx_plugin` crate with VST3 and CLAP features
 - [x] VST3 implementation (nih-plug; originally specified `aurix`, which does not exist)
 - [x] CLAP implementation (nih-plug; originally specified `clap-ffi`, which does not exist)
-- [ ] Plugin label: "AIDA_X", unique ID: "aida"
+- [x] Plugin label: "AIDA_X", unique ID: "aida" (DPF-identical VST3 class ID / CLAP id, TICKET-020)
 - [x] Brand: "AIDA DSP", URI: "http://aidadsp.cc/plugins/aidadsp-bundle/rt-neural-loader"
 - [ ] All 24 parameters initialized with correct names, units, ranges, enums
 - [ ] State serialization/deserialization (JSON format matching DPF current format)
@@ -35,3 +35,13 @@ Create plugin entry points for VST3 and CLAP formats. The core audio pipeline fr
 ## Audit 2026-11-07
 Original code targeted non-existent crates and never compiled. Rebuilt on nih-plug rev de421011 (commit 145a8e3), integrated on `integration/rust-core`. Release DLL exports `clap_entry`/`GetPluginFactory`; 10 tests pass.
 Not met / deviations: only 21 host params (ModelInSize/MeterIn/MeterOut are not host params in nih-plug); VST3 class ID and param hashing differ from DPF, so existing projects/automation are not compatible; state is nih-plug format (model/IR paths under DPF keys `json`/`cabinet`). Model and cabinet stages are pass-through TODOs (convolver now exists in core; model needs realtime backend, see TICKET-004); file loading only logs paths. No DAW / clap-validator / pluginval run yet.
+
+## Checklist
+- [x] Code implemented
+- [x] Tests written
+- [x] Self-review passed
+- [ ] PR created
+- [ ] Merged
+
+## Review 2026-11-07
+Open: 24 params (21 host params + 3 outputs via PluginOutputs — nih-plug has no output params), DPF state format (TICKET-023), DAW test (TICKET-021).

@@ -4,7 +4,7 @@ status: backlog
 assignee:
 priority: medium
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-07
 ---
 
 # Implement CLI utility crate for model validation and batch operations
@@ -26,3 +26,10 @@ Create `aidadx_cli` — a command-line tool for validating neural model JSON fil
 - Model validation should parse JSON, detect architecture, and verify all required fields
 - Benchmark mode: warm-up run + 100 iterations, report mean/median/stddev
 - No GUI dependencies (pure binary, no wgpu/egui)
+
+## Checklist
+- [ ] Code implemented
+- [ ] Tests written
+- [ ] Self-review passed
+- [ ] PR created
+- [ ] Merged
