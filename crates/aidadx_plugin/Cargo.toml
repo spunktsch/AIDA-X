@@ -17,6 +17,11 @@ aidadx_core = { path = "../aidadx_core" }
 # Its VST3 bindings (vst3-sys) are GPLv3, compatible with AIDA-X (GPL-3.0-or-later).
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683", default-features = false }
 
+[dev-dependencies]
+# The exact clap-sys nih-plug uses at the pinned revision; tests/host_behaviour.rs drives
+# the exported `clap_entry` like a host / clap-validator would.
+clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
+
 [features]
 default = ["clap", "vst3"]
 # Export the CLAP entry point (`clap_entry`).

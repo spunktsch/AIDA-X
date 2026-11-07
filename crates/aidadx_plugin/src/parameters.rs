@@ -265,6 +265,28 @@ fn hz(name: &str, default: f32, min: f32, max: f32) -> FloatParam {
     linear(name, default, min, max, " Hz").with_value_to_string(formatters::v2s_f32_rounded(0))
 }
 
+/// ANTIALIASING display: exactly 0 disables the filter and reads "Off"; any other value is
+/// shown with one decimal, but never as "0.0" (the filter is still active), so that
+/// value -> text -> value -> text is stable (hosts and clap-validator check this).
+fn antialiasing_to_string(v: f32) -> String {
+    if v == 0.0 {
+        String::from("Off")
+    } else {
+        format!("{:.1}", v.max(0.1))
+    }
+}
+
+/// Inverse of [`antialiasing_to_string`]. Hosts may pass the text with the unit appended
+/// (nih-plug's CLAP wrapper does: `"Off %"`, `"66.2 %"`).
+fn antialiasing_from_string(s: &str) -> Option<f32> {
+    let s = s.trim().trim_end_matches('%').trim_end();
+    if s.eq_ignore_ascii_case("off") {
+        Some(0.0)
+    } else {
+        s.parse().ok()
+    }
+}
+
 /// DPF boolean parameters without enumeration labels.
 fn on_off(name: &str, default: bool) -> BoolParam {
     BoolParam::new(name, default)
@@ -285,15 +307,9 @@ impl AidaParams {
             scheme,
 
             // Value 0 is labelled "Off" in initParameter().
-            antialiasing: linear("ANTIALIASING", 66.216, 0.0, 100.0, " %").with_value_to_string(
-                Arc::new(|v| {
-                    if v == 0.0 {
-                        String::from("Off")
-                    } else {
-                        format!("{v:.1}")
-                    }
-                }),
-            ),
+            antialiasing: linear("ANTIALIASING", 66.216, 0.0, 100.0, " %")
+                .with_value_to_string(Arc::new(antialiasing_to_string))
+                .with_string_to_value(Arc::new(antialiasing_from_string)),
             input: db("INPUT", -12.0, 12.0),
             net_bypass: on_off("NETBYPASS", false),
             eq_bypass: on_off("EQBYPASS", false),
@@ -670,6 +686,25 @@ mod tests {
             params.mid_type.normalized_value_to_string(1.0, false),
             "BANDPASS"
         );
+    }
+
+    /// "Off" must parse back (with and without the unit the CLAP wrapper appends), and no
+    /// non-zero value may display as "Off"/"0.0" (TICKET-021).
+    #[test]
+    fn antialiasing_text_round_trips() {
+        let p = AidaParams::default();
+        let aa = &p.antialiasing;
+        assert_eq!(aa.normalized_value_to_string(0.0, true), "Off %");
+        for text in ["Off", "Off %", "off", " OFF% "] {
+            assert_eq!(aa.string_to_normalized_value(text), Some(0.0), "{text:?}");
+        }
+        assert_eq!(aa.normalized_value_to_string(1e-7, false), "0.1");
+        for normalized in [0.0, 1e-7, 0.0004, 0.123_45, 0.5, 0.662_16, 1.0] {
+            let text = aa.normalized_value_to_string(normalized, true);
+            let back = aa.string_to_normalized_value(&text).expect(&text);
+            assert_eq!(aa.normalized_value_to_string(back, true), text);
+        }
+        assert_eq!(aa.string_to_normalized_value("garbage"), None);
     }
 
     #[test]
