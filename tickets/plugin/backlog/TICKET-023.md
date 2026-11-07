@@ -16,6 +16,7 @@ Follow-up of TICKET-020. Plugin/parameter IDs already match DPF, but projects sa
 - [ ] Vendored/forked nih-plug (pinned) with optional hook `deserialize_foreign_state(&[u8]) -> Option<PluginState>` called when JSON parsing fails (`wrapper/state.rs`)
 - [ ] AIDA-X parses the DPF blob (`__dpf_state_begin__` json/cabinet ... `__dpf_parameters_begin__` symbol/value pairs ... `\xfe`) for VST3 and CLAP
 - [ ] CLAP param info reports plain ranges for continuous params (opt-in in the fork)
+- [ ] Bound the state length prefix: a huge prefix (e.g. u64::MAX) currently makes nih-plug allocate before reading and aborts the host (found in TICKET-021)
 - [ ] Tests with real DPF state blobs captured from the C++ build
 - [ ] Patch proposed upstream to nih-plug
 
