@@ -23,7 +23,11 @@ pub fn map(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 
 }
 
 /// Biquad filter cascade parameters.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// `Default` yields the C++ plugin defaults (`kParameters[i].ranges.def` in
+/// DistrhoPluginCommon.hpp), which the C++ constructor loads before the first
+/// `sampleRateChanged()`.
+#[derive(Debug, Clone, Copy)]
 pub struct CascadeParameters {
     pub in_lpf: f64,
     pub in_level: f64,
@@ -46,6 +50,34 @@ pub struct CascadeParameters {
     pub param1: f64,
     pub param2: f64,
     pub dc_blocker: f64,
+}
+
+impl Default for CascadeParameters {
+    fn default() -> Self {
+        Self {
+            in_lpf: 66.216,
+            in_level: 0.0,
+            net_bypass: 0.0,
+            eq_bypass: 0.0,
+            eq_pos: 0.0,
+            bass_gain: 0.0,
+            bass_freq: 305.0,
+            mid_gain: 0.0,
+            mid_freq: 750.0,
+            mid_q: 0.707,
+            mid_type: 0.0,
+            treble_gain: 0.0,
+            treble_freq: 2000.0,
+            depth: 0.0,
+            presence: 0.0,
+            out_level: 0.0,
+            cab_sim_bypass: 0.0,
+            global_bypass: 0.0,
+            param1: 0.0,
+            param2: 0.0,
+            dc_blocker: 1.0,
+        }
+    }
 }
 
 impl CascadeParameters {
@@ -117,13 +149,13 @@ impl GainRamp {
         }
     }
 
+    /// Set the T60 time constant in seconds (keeps current and target value).
     pub fn set_time_constant(&mut self, tc: f64) {
-        self.smoother = ExponentialValueSmoother::with_time_constant(tc);
+        self.smoother.set_time_constant(tc);
     }
 
+    /// Set the sample rate (keeps current and target value, like C++).
     pub fn set_sample_rate(&mut self, sr: f64) {
-        let tc = self.smoother.time_constant();
-        self.smoother = ExponentialValueSmoother::with_time_constant(tc);
         self.smoother.set_sample_rate(sr);
     }
 
@@ -286,9 +318,9 @@ impl AidaToneControl {
                 .process_inplace(&mut output[..len]);
         }
 
-        let in_gain = self.inlevel.next();
-        for i in 0..len {
-            output[i] *= in_gain as f32;
+        // Pre-gain: C++ applyGainRamp advances the smoother once per sample.
+        for sample in &mut output[..len] {
+            *sample *= self.inlevel.next() as f32;
         }
 
         if !self.eq_bypass && self.eq_pos == EqPos::Pre {
@@ -307,9 +339,9 @@ impl AidaToneControl {
                 .process_eq_post(&mut output[..len], self.mid_type);
         }
 
-        let out_gain = self.outlevel.next();
-        for i in 0..len {
-            output[i] *= out_gain as f32;
+        // Output volume, per-sample ramp as in C++ applyGainRamp.
+        for sample in &mut output[..len] {
+            *sample *= self.outlevel.next() as f32;
         }
     }
 }
@@ -398,6 +430,9 @@ mod tests {
         params.in_level = 0.0;
         params.out_level = 0.0;
         tc.set_sample_rate(&params, 48000.0);
+        // The host calls activate() before run(); it clears the gain ramps
+        // to their targets (aidadsp-plugin.cpp activate()).
+        tc.reset();
         tc.eq_bypass = true;
         tc.dc_blocker_enabled = false;
         tc.input_lpf_enabled = false;
@@ -417,6 +452,8 @@ mod tests {
         let mut tc = AidaToneControl::new();
         let params = CascadeParameters::default();
         tc.set_sample_rate(&params, 48000.0);
+        // activate(): start from the same state that reset() restores.
+        tc.reset();
 
         let input = vec![0.5f32; 64];
         let mut output1 = vec![0.0f32; 64];
