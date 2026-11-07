@@ -62,13 +62,13 @@ jobs:
             os: windows-latest
             target: ""
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             target: ""
           # Cross-compiled on the arm64 runner. No universal binary yet: the xtask wrapper
           # (xtask/src/main.rs) only implements `bundle`, not nih_plug_xtask's
           # `bundle-universal`. Tests are not run for this target.
           - name: macos-x64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
