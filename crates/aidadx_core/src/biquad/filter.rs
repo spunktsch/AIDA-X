@@ -221,15 +221,17 @@ impl Biquad {
 
         match self.params.filter_type {
             BiquadType::LowPass => {
+                // Same evaluation order as Biquad.cpp (a1 = 2 * a0, a2 = a0) so the
+                // coefficients are bit-identical to the C++ ones.
                 let n = 1.0 / (1.0 + k / self.params.q + k * k);
+                let a0 = k * k * n;
                 self.coeffs = Coefficients {
-                    a0: k * k * n,
-                    a1: 2.0 * n * k * k,
-                    a2: n * k * k,
+                    a0,
+                    a1: 2.0 * a0,
+                    a2: a0,
                     b1: 2.0 * (k * k - 1.0) * n,
                     b2: (1.0 - k / self.params.q + k * k) * n,
                 };
-                return;
             }
             BiquadType::HighPass => {
                 let n = 1.0 / (1.0 + k / self.params.q + k * k);
@@ -240,7 +242,6 @@ impl Biquad {
                     b1: 2.0 * (k * k - 1.0) * n,
                     b2: (1.0 - k / self.params.q + k * k) * n,
                 };
-                return;
             }
             BiquadType::BandPass => {
                 let n = 1.0 / (1.0 + k / self.params.q + k * k);
@@ -251,7 +252,6 @@ impl Biquad {
                     b1: 2.0 * (k * k - 1.0) * n,
                     b2: (1.0 - k / self.params.q + k * k) * n,
                 };
-                return;
             }
             BiquadType::Notch => {
                 let n = 1.0 / (1.0 + k / self.params.q + k * k);
@@ -262,7 +262,6 @@ impl Biquad {
                     b1: 2.0 * (k * k - 1.0) * n,
                     b2: (1.0 - k / self.params.q + k * k) * n,
                 };
-                return;
             }
             BiquadType::Peak => {
                 if self.params.peak_gain_db >= 0.0 {
@@ -286,7 +285,6 @@ impl Biquad {
                         b2: (1.0 - v / self.params.q * k + k * k) * n,
                     };
                 }
-                return;
             }
             BiquadType::LowShelf => {
                 if self.params.peak_gain_db >= 0.0 {
@@ -314,7 +312,6 @@ impl Biquad {
                         b2: (1.0 - sqrt2v * k + v * k * k) * n,
                     };
                 }
-                return;
             }
             BiquadType::HighShelf => {
                 if self.params.peak_gain_db >= 0.0 {
@@ -342,9 +339,8 @@ impl Biquad {
                         b2: (v - sqrt2v * k + k * k) * n,
                     };
                 }
-                return;
             }
-        };
+        }
     }
 }
 

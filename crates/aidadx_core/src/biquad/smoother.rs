@@ -1,5 +1,5 @@
-/// Value smoother traits and implementations.
-/// Ported from DPF's ExponentialValueSmoother and LinearValueSmoother.
+//! Value smoother traits and implementations.
+//! Ported from DPF's ExponentialValueSmoother and LinearValueSmoother.
 
 /// Common trait for value smoothers.
 pub trait ValueSmoother: Clone + std::fmt::Debug {
@@ -19,15 +19,22 @@ pub trait ValueSmoother: Clone + std::fmt::Debug {
     fn peek(&self) -> f64;
 }
 
-/// Mirrors DPF's `d_isNotEqual`: values differ by at least machine epsilon.
+// Both smoothers keep their state in `f32`, exactly like DPF (`float coef, target,
+// mem, tau, sampleRate`). The public API stays `f64` for convenience, but values are
+// rounded to `f32` on the way in. Computing in `f64` instead drifts measurably from
+// the C++ output: `1 - coef` of a 1 s T60 smoother at 48 kHz is ~1.4e-4, so the f32
+// rounding of `coef` changes the effective time constant by ~0.04 % and the ramp
+// differs by up to ~6e-4 (golden test `tests/biquad_golden.rs`, TICKET-022).
+
+/// Mirrors DPF's `d_isNotEqual` for `float`: values differ by at least `FLT_EPSILON`.
 #[inline]
-fn is_not_equal(a: f64, b: f64) -> bool {
-    (a - b).abs() >= f64::EPSILON
+fn is_not_equal(a: f32, b: f32) -> bool {
+    (a - b).abs() >= f32::EPSILON
 }
 
 /// DPF converts a T60 time constant to the exponential time constant tau
-/// with this factor (`newT60 * (1.0 / 6.91)`).
-const T60_TO_TAU: f64 = 1.0 / 6.91;
+/// with this factor (`newT60 * (float)(1.0 / 6.91)`).
+const T60_TO_TAU: f32 = (1.0 / 6.91) as f32;
 
 /// Exponential value smoother.
 ///
@@ -40,11 +47,11 @@ const T60_TO_TAU: f64 = 1.0 / 6.91;
 pub struct ExponentialValueSmoother {
     /// T60 time constant in seconds, as passed to `set_time_constant`.
     time_constant: f64,
-    tau: f64,
-    sample_rate: f64,
-    target_value: f64,
-    current_value: f64,
-    coef: f64,
+    tau: f32,
+    sample_rate: f32,
+    target_value: f32,
+    current_value: f32,
+    coef: f32,
 }
 
 impl ExponentialValueSmoother {
@@ -73,7 +80,7 @@ impl ExponentialValueSmoother {
     /// Set the T60 time constant in seconds.
     pub fn set_time_constant(&mut self, time_constant: f64) {
         self.time_constant = time_constant;
-        let new_tau = time_constant * T60_TO_TAU;
+        let new_tau = time_constant as f32 * T60_TO_TAU;
         if is_not_equal(self.tau, new_tau) {
             self.tau = new_tau;
             self.update_coef();
@@ -81,17 +88,29 @@ impl ExponentialValueSmoother {
     }
 
     pub fn target_value(&self) -> f64 {
-        self.target_value
+        self.target_value as f64
     }
 
     /// The current (last output) value, like C++ `getCurrentValue()`.
     pub fn current_value(&self) -> f64 {
+        self.current_value as f64
+    }
+
+    /// `next()` without the `f64` round trip, for per-sample gain ramps.
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        self.current_value = self.peek_f32();
         self.current_value
+    }
+
+    #[inline]
+    fn peek_f32(&self) -> f32 {
+        self.current_value * self.coef + self.target_value * (1.0 - self.coef)
     }
 
     fn update_coef(&mut self) {
         // With tau * sample_rate == 0 this is exp(-inf) == 0: no smoothing.
-        self.coef = (-1.0 / (self.tau * self.sample_rate)).exp();
+        self.coef = (-1.0_f32 / (self.tau * self.sample_rate)).exp();
     }
 }
 
@@ -103,6 +122,7 @@ impl Default for ExponentialValueSmoother {
 
 impl ValueSmoother for ExponentialValueSmoother {
     fn set_sample_rate(&mut self, sample_rate: f64) {
+        let sample_rate = sample_rate as f32;
         if is_not_equal(self.sample_rate, sample_rate) {
             self.sample_rate = sample_rate;
             self.update_coef();
@@ -110,13 +130,12 @@ impl ValueSmoother for ExponentialValueSmoother {
     }
 
     fn set_target_value(&mut self, target: f64) {
-        self.target_value = target;
+        self.target_value = target as f32;
     }
 
     #[inline]
     fn next(&mut self) -> f64 {
-        self.current_value = self.peek();
-        self.current_value
+        self.next_f32() as f64
     }
 
     fn clear_to_target_value(&mut self) {
@@ -125,7 +144,7 @@ impl ValueSmoother for ExponentialValueSmoother {
 
     #[inline]
     fn peek(&self) -> f64 {
-        self.current_value * self.coef + self.target_value * (1.0 - self.coef)
+        self.peek_f32() as f64
     }
 }
 
@@ -137,11 +156,11 @@ impl ValueSmoother for ExponentialValueSmoother {
 /// default-constructed smoother (tau = 0) jumps to its target immediately.
 #[derive(Debug, Clone)]
 pub struct LinearValueSmoother {
-    time_constant: f64,
-    sample_rate: f64,
-    target_value: f64,
-    current_value: f64,
-    step: f64,
+    time_constant: f32,
+    sample_rate: f32,
+    target_value: f32,
+    current_value: f32,
+    step: f32,
 }
 
 impl LinearValueSmoother {
@@ -163,11 +182,12 @@ impl LinearValueSmoother {
 
     /// The segment duration in seconds.
     pub fn time_constant(&self) -> f64 {
-        self.time_constant
+        self.time_constant as f64
     }
 
     /// Set the segment duration in seconds.
     pub fn set_time_constant(&mut self, time_constant: f64) {
+        let time_constant = time_constant as f32;
         if is_not_equal(self.time_constant, time_constant) {
             self.time_constant = time_constant;
             self.update_step();
@@ -175,12 +195,26 @@ impl LinearValueSmoother {
     }
 
     pub fn target_value(&self) -> f64 {
-        self.target_value
+        self.target_value as f64
     }
 
     /// The current (last output) value, like C++ `getCurrentValue()`.
     pub fn current_value(&self) -> f64 {
+        self.current_value as f64
+    }
+
+    /// `next()` without the `f64` round trip.
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        self.current_value = self.peek_f32();
         self.current_value
+    }
+
+    #[inline]
+    fn peek_f32(&self) -> f32 {
+        // f32::min ignores NaN like C++ std::fmin (step is NaN for 0/0).
+        let dy = self.target_value - self.current_value;
+        self.current_value + dy.abs().min(self.step).copysign(dy)
     }
 
     fn update_step(&mut self) {
@@ -197,6 +231,7 @@ impl Default for LinearValueSmoother {
 
 impl ValueSmoother for LinearValueSmoother {
     fn set_sample_rate(&mut self, sample_rate: f64) {
+        let sample_rate = sample_rate as f32;
         if is_not_equal(self.sample_rate, sample_rate) {
             self.sample_rate = sample_rate;
             self.update_step();
@@ -204,6 +239,7 @@ impl ValueSmoother for LinearValueSmoother {
     }
 
     fn set_target_value(&mut self, target: f64) {
+        let target = target as f32;
         if is_not_equal(self.target_value, target) {
             self.target_value = target;
             self.update_step();
@@ -212,8 +248,7 @@ impl ValueSmoother for LinearValueSmoother {
 
     #[inline]
     fn next(&mut self) -> f64 {
-        self.current_value = self.peek();
-        self.current_value
+        self.next_f32() as f64
     }
 
     fn clear_to_target_value(&mut self) {
@@ -222,9 +257,7 @@ impl ValueSmoother for LinearValueSmoother {
 
     #[inline]
     fn peek(&self) -> f64 {
-        // f64::min ignores NaN like C++ std::fmin (step is NaN for 0/0).
-        let dy = self.target_value - self.current_value;
-        self.current_value + dy.abs().min(self.step).copysign(dy)
+        self.peek_f32() as f64
     }
 }
 
@@ -287,8 +320,9 @@ mod tests {
         smoother.set_sample_rate(48000.0);
         smoother.set_target_value(1.0);
 
-        let coef = (-1.0_f64 / (1.0 / 6.91 * 48000.0)).exp();
-        assert!((smoother.next() - (1.0 - coef)).abs() < 1e-15);
+        // All in f32, like DPF.
+        let coef = (-1.0_f32 / ((1.0 / 6.91_f64) as f32 * 48000.0)).exp();
+        assert_eq!(smoother.next(), (1.0 - coef) as f64);
 
         // After T60 seconds a 0-to-1 transition is within -60 dB of the target.
         for _ in 1..48000 {
@@ -371,12 +405,13 @@ mod tests {
         smoother.set_sample_rate(48000.0);
         smoother.set_time_constant(0.1);
 
-        let expected_step = 1.0 / 0.1 / 48000.0;
+        // DPF computes the step in float: |1 - 0| / (0.1f * 48000.f).
+        let expected_step = (1.0_f32 / (0.1_f32 * 48000.0)) as f64;
         smoother.set_target_value(1.0);
         let first_step = smoother.next();
 
         assert!(
-            (first_step - expected_step).abs() < 1e-15,
+            first_step == expected_step,
             "Step should be bounded: got {}, expected {}",
             first_step,
             expected_step

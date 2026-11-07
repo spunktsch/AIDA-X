@@ -6,20 +6,30 @@ use super::cascade::{BiquadCascade, EqPos, MidEqType};
 use super::filter::BiquadType;
 use super::smoother::{ExponentialValueSmoother, ValueSmoother};
 
-/// Convert dB to linear coefficient, matching C++ DB_CO macro.
+/// Convert dB to linear coefficient, matching C++ `DB_CO`
+/// (aidadsp-plugin.cpp:33), which computes in `float`.
 #[inline]
 pub fn db_to_coeff(g: f64) -> f64 {
+    let g = g as f32;
     if g > -90.0 {
-        10.0_f64.powf(g * 0.05)
+        10.0_f32.powf(g * 0.05) as f64
     } else {
         0.0
     }
 }
 
-/// Map a value from one range to another, matching C++ MAP macro.
+/// Map a value from one range to another, matching C++ `MAP`
+/// (aidadsp-plugin.cpp:36), which computes in `float`.
 #[inline]
 pub fn map(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
-    (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+    let (x, in_min, in_max, out_min, out_max) = (
+        x as f32,
+        in_min as f32,
+        in_max as f32,
+        out_min as f32,
+        out_max as f32,
+    );
+    ((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min) as f64
 }
 
 /// Biquad filter cascade parameters.
@@ -55,7 +65,8 @@ pub struct CascadeParameters {
 impl Default for CascadeParameters {
     fn default() -> Self {
         Self {
-            in_lpf: 66.216,
+            // C++ parameters are `float`: keep the f32-rounded defaults.
+            in_lpf: 66.216_f32 as f64,
             in_level: 0.0,
             net_bypass: 0.0,
             eq_bypass: 0.0,
@@ -64,7 +75,7 @@ impl Default for CascadeParameters {
             bass_freq: 305.0,
             mid_gain: 0.0,
             mid_freq: 750.0,
-            mid_q: 0.707,
+            mid_q: 0.707_f32 as f64,
             mid_type: 0.0,
             treble_gain: 0.0,
             treble_freq: 2000.0,
@@ -163,6 +174,7 @@ impl GainRamp {
         self.smoother.set_target_value(db_to_coeff(db));
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> f64 {
         self.smoother.next()
     }
@@ -182,11 +194,13 @@ impl Default for GainRamp {
     }
 }
 
-const COMMON_Q: f64 = 0.707;
+/// C++ `COMMON_Q` is `0.707f`, passed to `Biquad` as `double` (0.7070000171661377).
+const COMMON_Q: f64 = 0.707_f32 as f64;
 const DEPTH_FREQ: f64 = 75.0;
 const PRESENCE_FREQ: f64 = 900.0;
-const INLPF_MAX_CO: f64 = 0.99 * 0.5;
-const INLPF_MIN_CO: f64 = 0.25 * 0.5;
+// C++ computes these in `float` (aidadsp-plugin.cpp:48-49).
+const INLPF_MAX_CO: f64 = (0.99_f32 * 0.5) as f64;
+const INLPF_MIN_CO: f64 = (0.25_f32 * 0.5) as f64;
 
 /// AidaToneControl: complete state machine for tone controls.
 ///
@@ -238,7 +252,8 @@ impl AidaToneControl {
                 self.cascade
                     .in_lpf_mut()
                     .set_biquad(BiquadType::LowPass, cutoff, COMMON_Q, 0.0);
-                self.input_lpf_enabled = value.abs() > 1e-10;
+                // C++: `d_isNotZero(value)` on the float parameter.
+                self.input_lpf_enabled = (value as f32).abs() >= f32::EPSILON;
             }
             1 => {
                 self.inlevel.set_target(value);
@@ -308,9 +323,7 @@ impl AidaToneControl {
             return;
         }
 
-        for i in 0..len {
-            output[i] = input[i];
-        }
+        output[..len].copy_from_slice(&input[..len]);
 
         if self.input_lpf_enabled {
             self.cascade
@@ -409,9 +422,11 @@ mod tests {
     #[test]
     fn test_tone_control_process_valid() {
         let mut tc = AidaToneControl::new();
-        let mut params = CascadeParameters::default();
-        params.in_level = 0.0;
-        params.out_level = 0.0;
+        let params = CascadeParameters {
+            in_level: 0.0,
+            out_level: 0.0,
+            ..Default::default()
+        };
         tc.set_sample_rate(&params, 48000.0);
 
         let input = vec![0.1f32; 64];
@@ -426,9 +441,11 @@ mod tests {
     #[test]
     fn test_tone_control_bypass() {
         let mut tc = AidaToneControl::new();
-        let mut params = CascadeParameters::default();
-        params.in_level = 0.0;
-        params.out_level = 0.0;
+        let params = CascadeParameters {
+            in_level: 0.0,
+            out_level: 0.0,
+            ..Default::default()
+        };
         tc.set_sample_rate(&params, 48000.0);
         // The host calls activate() before run(); it clears the gain ramps
         // to their targets (aidadsp-plugin.cpp activate()).

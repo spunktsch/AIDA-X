@@ -74,9 +74,7 @@ impl BiquadCascade {
             return;
         }
 
-        for i in 0..len {
-            output[i] = input[i];
-        }
+        output[..len].copy_from_slice(&input[..len]);
 
         self.dc_blocker.process_inplace(&mut output[..len]);
     }
@@ -214,7 +212,8 @@ pub enum ParameterIndex {
     MeterOut = 23,
 }
 
-const COMMON_Q: f64 = 0.707;
+/// C++ `COMMON_Q` is `0.707f`, passed to `Biquad` as `double` (0.7070000171661377).
+const COMMON_Q: f64 = 0.707_f32 as f64;
 const DEPTH_FREQ: f64 = 75.0;
 const PRESENCE_FREQ: f64 = 900.0;
 const DEFAULT_BASS_FREQ: f64 = 0.2;
