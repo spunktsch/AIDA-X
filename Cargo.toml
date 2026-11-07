@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aidadx_core",
+    "crates/aidadx_ui",
+    "crates/aidadx_plugin",
+    "crates/aidadx_ios",
+    "crates/aidadx_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"

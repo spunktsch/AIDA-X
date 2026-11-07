@@ -1,0 +1,22 @@
+[package]
+name = "aidadx_plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "VST3 and CLAP plugin backends for AIDA-X neural amp modeler"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+aidadx_core = { path = "../aidadx_core", features = ["candle"] }
+
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+[features]
+default = ["clap"]
+clap = []
+vst3 = []
