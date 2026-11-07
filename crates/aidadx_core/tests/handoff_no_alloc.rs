@@ -16,39 +16,44 @@ use aidadx_core::handoff::Handoff;
 
 struct Counting;
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static FREES: AtomicUsize = AtomicUsize::new(0);
-
+// Counters are per thread as well: global counters would also pick up allocations
+// counted on other test threads running in parallel (flaky failures).
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static FREES: Cell<usize> = const { Cell::new(0) };
 }
 
 fn counting() -> bool {
     COUNTING.try_with(|c| c.get()).unwrap_or(false)
 }
 
+fn bump(counter: &'static std::thread::LocalKey<Cell<usize>>) {
+    let _ = counter.try_with(|c| c.set(c.get() + 1));
+}
+
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if counting() {
-            ALLOCS.fetch_add(1, Ordering::SeqCst);
+            bump(&ALLOCS);
         }
         System.alloc(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if counting() {
-            FREES.fetch_add(1, Ordering::SeqCst);
+            bump(&FREES);
         }
         System.dealloc(ptr, layout)
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if counting() {
-            ALLOCS.fetch_add(1, Ordering::SeqCst);
+            bump(&ALLOCS);
         }
         System.alloc_zeroed(layout)
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if counting() {
-            ALLOCS.fetch_add(1, Ordering::SeqCst);
+            bump(&ALLOCS);
         }
         System.realloc(ptr, layout, new_size)
     }
@@ -59,15 +64,11 @@ static GLOBAL: Counting = Counting;
 
 /// Runs `f` with counting enabled on this thread; returns (allocations, frees, result).
 fn count<R>(f: impl FnOnce() -> R) -> (usize, usize, R) {
-    let (a0, f0) = (ALLOCS.load(Ordering::SeqCst), FREES.load(Ordering::SeqCst));
+    let (a0, f0) = (ALLOCS.with(Cell::get), FREES.with(Cell::get));
     COUNTING.with(|c| c.set(true));
     let r = f();
     COUNTING.with(|c| c.set(false));
-    (
-        ALLOCS.load(Ordering::SeqCst) - a0,
-        FREES.load(Ordering::SeqCst) - f0,
-        r,
-    )
+    (ALLOCS.with(Cell::get) - a0, FREES.with(Cell::get) - f0, r)
 }
 
 /// Heap-heavy payload, like a model: the `Box` plus an inner allocation.
