@@ -1,6 +1,6 @@
 ---
 id: TICKET-017
-status: backlog
+status: active
 assignee:
 priority: high
 created: 2026-11-07
