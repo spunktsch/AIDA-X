@@ -1,0 +1,13 @@
+[package]
+name = "aidadx_rtneural"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FFI wrapper around the vendored C++ RTNeural engine (the 54 compile-time AIDA-X model types)"
+build = "build.rs"
+links = "aidadx_rtneural_shim"
+
+[dependencies]
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }

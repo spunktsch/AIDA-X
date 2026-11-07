@@ -9,6 +9,8 @@ pub enum ModelError {
     Parse(String),
     /// The JSON is well-formed but describes a model AIDA-X cannot run.
     Unsupported(String),
+    /// The inference backend (RTNeural) rejected the model.
+    Backend(String),
     /// A tensor operation failed during model construction or inference.
     #[cfg(feature = "candle")]
     Candle(candle_core::Error),
@@ -19,6 +21,7 @@ impl fmt::Display for ModelError {
         match self {
             ModelError::Parse(msg) => write!(f, "model parse error: {msg}"),
             ModelError::Unsupported(msg) => write!(f, "unsupported model: {msg}"),
+            ModelError::Backend(msg) => write!(f, "inference backend error: {msg}"),
             #[cfg(feature = "candle")]
             ModelError::Candle(e) => write!(f, "tensor error: {e}"),
         }

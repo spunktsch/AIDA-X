@@ -1,15 +1,22 @@
-//! Model tests. The candle implementation is checked against a scalar reference
-//! that transcribes RTNeural's non-templated `GRULayer`/`LSTMLayer`/`Dense`
+//! Model tests. The inference backends (RTNeural via FFI by default, candle
+//! behind its feature) are checked against a scalar reference that transcribes
+//! RTNeural's non-templated `GRULayer`/`LSTMLayer`/`Dense`
 //! (`setWVals`/`setUVals`/`setBVals` + `forward`) and reads the JSON directly,
 //! independently of `parser.rs`.
+//!
+//! Parser / detection / validation tests run in every feature configuration;
+//! inference tests need `rtneural` or `candle`.
 
-use crate::model::loader::{
-    custom_model_creator, detect_arch, detect_arch_from_config, AtomicModel, DynamicModel,
-};
+#![cfg_attr(not(any(feature = "rtneural", feature = "candle")), allow(dead_code))]
+
+#[cfg(any(feature = "rtneural", feature = "candle"))]
+use crate::model::loader::{custom_model_creator, AtomicModel, DynamicModel, BACKEND};
+use crate::model::loader::{detect_arch, detect_arch_from_config, validate_network};
 use crate::model::parser::parse_model;
-use crate::model::types::{db_to_coef, LayerType, ModelArch, ModelError, SUPPORTED_HIDDEN_SIZES};
+use crate::model::types::{db_to_coef, LayerType, ModelArch, ModelError, ModelResult, SUPPORTED_HIDDEN_SIZES};
 
 use serde_json::{json, Value};
+#[cfg(any(feature = "rtneural", feature = "candle"))]
 use std::time::Instant;
 
 const REAL_MODEL: &str = concat!(
@@ -304,284 +311,63 @@ fn detect_all_54_architectures() {
     assert!(detect_arch(LayerType::Dense, 8, 1).is_none());
 }
 
+/// Builds a model with the backend if there is one, otherwise runs the
+/// backend-independent parse + detect + validate steps.
+fn try_create(json: &str) -> ModelResult<()> {
+    #[cfg(any(feature = "rtneural", feature = "candle"))]
+    {
+        custom_model_creator(json).map(|_| ())
+    }
+    #[cfg(not(any(feature = "rtneural", feature = "candle")))]
+    {
+        let cfg = parse_model(json)?;
+        let arch = detect_arch_from_config(&cfg)?;
+        validate_network(&cfg, arch)
+    }
+}
+
 #[test]
 fn create_rejects_unsupported_models() {
     let m = model_json(LayerType::Gru, 10, 1, json!({}), 1);
-    assert!(matches!(custom_model_creator(&m.to_string()), Err(ModelError::Unsupported(_))));
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
 
     let m = model_json(LayerType::Lstm, 8, 1, json!({"in_shape": [null, null, 4]}), 1);
-    assert!(matches!(custom_model_creator(&m.to_string()), Err(ModelError::Unsupported(_))));
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
 
     // Dense first.
     let mut m = model_json(LayerType::Gru, 8, 1, json!({}), 1);
     let layers = m["layers"].as_array_mut().unwrap();
     layers.swap(0, 1);
-    assert!(custom_model_creator(&m.to_string()).is_err());
+    assert!(try_create(&m.to_string()).is_err());
 
     // GRU with a 1-D bias (Keras reset_after=False) is not what RTNeural reads.
     let mut m = model_json(LayerType::Gru, 8, 1, json!({}), 1);
     m["layers"][0]["weights"][2] = json!(vec![0.0f32; 24]);
-    assert!(matches!(custom_model_creator(&m.to_string()), Err(ModelError::Unsupported(_))));
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
 
     // Wrong kernel width.
     let mut m = model_json(LayerType::Lstm, 8, 1, json!({}), 1);
     m["layers"][0]["weights"][0] = json!([vec![0.0f32; 24]]);
-    assert!(matches!(custom_model_creator(&m.to_string()), Err(ModelError::Unsupported(_))));
-}
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
 
-// ---------------------------------------------------------------------------
-// Inference vs. RTNeural reference
-// ---------------------------------------------------------------------------
+    // Wrong dense shape / extra layer.
+    let mut m = model_json(LayerType::Lstm, 8, 1, json!({}), 1);
+    m["layers"][1]["weights"][0] = json!(vec![vec![0.0f32; 2]; 8]);
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
+    let mut m = model_json(LayerType::Lstm, 8, 1, json!({}), 1);
+    let extra = m["layers"][1].clone();
+    m["layers"].as_array_mut().unwrap().push(extra);
+    assert!(matches!(try_create(&m.to_string()), Err(ModelError::Unsupported(_))));
 
-/// Loads all 54 architectures from JSON and checks the candle forward pass
-/// against the scalar RTNeural transcription, sample by sample, including
-/// recurrent state carried across steps and the param1/param2 inputs.
-#[test]
-fn all_54_variants_match_rtneural_reference() {
-    let n = 256;
-    let signal = test_signal(n);
-    let (p1, p2) = (0.3f32, -0.7f32);
-    let mut count = 0;
+    // Every generated architecture passes validation.
     for arch in ModelArch::ALL {
-        let json = model_json(arch.layer_type(), arch.hidden_size(), arch.input_size(), json!({}), 0x5eed + count);
-        let mut model = custom_model_creator(&json.to_string()).unwrap();
-        assert_eq!(model.arch, arch);
-        let mut reference = RefModel::from_json(&json);
-
-        let inputs = [0.0, p1, p2];
-        let mut got = Vec::with_capacity(n);
-        let mut want = Vec::with_capacity(n);
-        for &s in &signal {
-            got.push(model.forward_sample(s, p1, p2).unwrap());
-            let mut x = inputs;
-            x[0] = s;
-            want.push(reference.forward(&x[..arch.input_size()]));
-        }
-        let err = max_abs_diff(&got, &want);
-        assert!(err < 1e-4, "{arch}: max abs diff {err}");
-        assert!(got.iter().all(|v| v.is_finite()));
-        // Non-trivial output that actually depends on the input.
-        let spread = got.iter().cloned().fold(f32::MIN, f32::max) - got.iter().cloned().fold(f32::MAX, f32::min);
-        assert!(spread > 1e-3, "{arch}: output is constant");
-        count += 1;
-    }
-    assert_eq!(count, 54);
-}
-
-#[test]
-fn params_affect_multi_input_models() {
-    for lt in [LayerType::Gru, LayerType::Lstm] {
-        let json = model_json(lt, 16, 3, json!({}), 99).to_string();
-        let mut a = custom_model_creator(&json).unwrap();
-        let mut b = a.clone();
-        let mut buf_a = test_signal(64);
-        let mut buf_b = buf_a.clone();
-        a.process(&mut buf_a, 0.0, 0.0).unwrap();
-        b.process(&mut buf_b, 1.0, 0.5).unwrap();
-        assert!(max_abs_diff(&buf_a, &buf_b) > 1e-3, "{lt}: params ignored");
+        let m = model_json(arch.layer_type(), arch.hidden_size(), arch.input_size(), json!({}), 5);
+        let cfg = parse_model(&m.to_string()).unwrap();
+        assert_eq!(detect_arch_from_config(&cfg).unwrap(), arch);
+        validate_network(&cfg, arch).unwrap();
     }
 }
 
-#[test]
-fn state_is_carried_and_reset() {
-    let json = model_json(LayerType::Lstm, 12, 1, json!({}), 7).to_string();
-    let mut model = custom_model_creator(&json).unwrap();
-    let first: Vec<f32> = (0..4).map(|_| model.forward_sample(0.5, 0.0, 0.0).unwrap()).collect();
-    assert!((first[0] - first[3]).abs() > 1e-6, "recurrent state not updated");
-    model.reset().unwrap();
-    let again: Vec<f32> = (0..4).map(|_| model.forward_sample(0.5, 0.0, 0.0).unwrap()).collect();
-    assert_eq!(first, again);
-}
 
-/// Real AIDA-X model from `files/`: compare against the reference and against
-/// the `output_batch` the exporter stored for `input_batch`.
-#[test]
-fn real_model_inference() {
-    let text = std::fs::read_to_string(REAL_MODEL).expect("example model in files/");
-    let root: Value = serde_json::from_str(&text).unwrap();
-    let mut model = DynamicModel::from_json(&text).unwrap();
-    assert_eq!(model.arch, ModelArch::Lstm12_1);
-    assert!(!model.input_skip);
-    assert_eq!((model.input_gain, model.output_gain), (1.0, 1.0));
-
-    let input = vec_of(&root["input_batch"]);
-    let expected = vec_of(&root["output_batch"]);
-    let mut reference = RefModel::from_json(&root);
-
-    let mut out = input.clone();
-    model.process(&mut out, 0.0, 0.0).unwrap();
-    let want: Vec<f32> = input.iter().map(|&x| reference.forward(&[x])).collect();
-
-    assert!(out.iter().all(|v| v.is_finite()));
-    let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
-    assert!(rms > 1e-3, "output is (near) silent: rms {rms}");
-    let err_ref = max_abs_diff(&out, &want);
-    assert!(err_ref < 1e-4, "candle vs RTNeural reference: {err_ref}");
-    let err_batch = max_abs_diff(&out, &expected);
-    assert!(err_batch < 1e-3, "candle vs exported output_batch: {err_batch}");
-
-    // A musical signal through the same model is non-trivial too.
-    model.reset().unwrap();
-    let mut sig = test_signal(4800);
-    model.process(&mut sig, 0.0, 0.0).unwrap();
-    assert!(sig.iter().all(|v| v.is_finite()));
-    let rms = (sig.iter().map(|v| v * v).sum::<f32>() / sig.len() as f32).sqrt();
-    assert!(rms > 1e-3, "rms {rms}");
-}
-
-// ---------------------------------------------------------------------------
-// Gains / skip (applyModel semantics)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn process_applies_gain_and_skip_like_apply_model() {
-    for skip in [0, 1] {
-        let json = model_json(LayerType::Gru, 8, 2, json!({"in_skip": skip, "in_gain": -6.0, "out_gain": 4.0}), 3);
-        let mut model = custom_model_creator(&json.to_string()).unwrap();
-        assert_eq!(model.input_skip, skip == 1);
-        let (ig, og) = (db_to_coef(-6.0), db_to_coef(4.0));
-        assert!((model.input_gain - ig).abs() < 1e-6);
-        assert!((model.output_gain - og).abs() < 1e-6);
-
-        let mut reference = RefModel::from_json(&json);
-        let input = test_signal(128);
-        let mut out = input.clone();
-        model.process(&mut out, 0.25, 0.0).unwrap();
-
-        let want: Vec<f32> = input
-            .iter()
-            .map(|&x| {
-                let x = x * ig;
-                let y = reference.forward(&[x, 0.25]);
-                if skip == 1 {
-                    (x + y) * og
-                } else {
-                    y * og
-                }
-            })
-            .collect();
-        let err = max_abs_diff(&out, &want);
-        assert!(err < 1e-4, "skip={skip}: {err}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Thread-safe swap
-// ---------------------------------------------------------------------------
-
-#[test]
-fn atomic_model_swap() {
-    let slot = AtomicModel::new();
-    let mut active: Option<Box<DynamicModel>> = None;
-    assert!(!slot.take_pending(&mut active));
-
-    let m8 = custom_model_creator(&model_json(LayerType::Gru, 8, 1, json!({}), 1).to_string()).unwrap();
-    let m12 = custom_model_creator(&model_json(LayerType::Lstm, 12, 1, json!({}), 2).to_string()).unwrap();
-    let m16 = custom_model_creator(&model_json(LayerType::Gru, 16, 1, json!({}), 3).to_string()).unwrap();
-
-    slot.publish(m8);
-    assert!(slot.has_pending());
-    assert!(slot.take_pending(&mut active));
-    assert_eq!(active.as_ref().unwrap().arch, ModelArch::Gru8_1);
-
-    // Latest publish wins if the audio thread has not picked up the previous one.
-    slot.publish(m12);
-    slot.publish(m16);
-    assert!(slot.take_pending(&mut active));
-    assert_eq!(active.as_ref().unwrap().arch, ModelArch::Gru16_1);
-    assert!(!slot.take_pending(&mut active));
-    slot.collect_garbage();
-}
-
-#[test]
-fn atomic_model_swap_across_threads() {
-    use std::sync::Arc;
-
-    let slot = Arc::new(AtomicModel::new());
-    let archs = [(LayerType::Gru, 8), (LayerType::Lstm, 8), (LayerType::Gru, 12), (LayerType::Lstm, 16)];
-    let models: Vec<DynamicModel> = archs
-        .iter()
-        .enumerate()
-        .map(|(i, &(lt, h))| custom_model_creator(&model_json(lt, h, 1, json!({}), i as u64 + 10).to_string()).unwrap())
-        .collect();
-    let last_arch = models.last().unwrap().arch;
-
-    let producer = {
-        let slot = Arc::clone(&slot);
-        std::thread::spawn(move || {
-            for m in models {
-                slot.publish(m);
-                std::thread::yield_now();
-            }
-        })
-    };
-
-    // "Audio thread": keeps processing while models are swapped in.
-    let mut active: Option<Box<DynamicModel>> = None;
-    let mut buf = [0.0f32; 32];
-    let mut swaps = 0;
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if slot.take_pending(&mut active) {
-            swaps += 1;
-        }
-        if let Some(m) = active.as_mut() {
-            buf.iter_mut().enumerate().for_each(|(i, s)| *s = (i as f32 * 0.1).sin());
-            m.process(&mut buf, 0.0, 0.0).unwrap();
-            assert!(buf.iter().all(|v| v.is_finite()));
-        }
-        if producer.is_finished() && !slot.has_pending() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "swap test timed out");
-    }
-    producer.join().unwrap();
-    assert!(swaps >= 1);
-    assert_eq!(active.unwrap().arch, last_arch);
-}
-
-// ---------------------------------------------------------------------------
-// Throughput (run with: cargo test --release -p aidadx_core --features candle
-//   model::tests::throughput -- --ignored --nocapture)
-// ---------------------------------------------------------------------------
-
-#[test]
-#[ignore]
-fn throughput() {
-    let sr = 48_000usize;
-    let signal = test_signal(sr);
-
-    let mut cases: Vec<(String, Value)> = Vec::new();
-    let real: Value = serde_json::from_str(&std::fs::read_to_string(REAL_MODEL).unwrap()).unwrap();
-    cases.push(("real LSTM_12_1 (tw40)".into(), real));
-    for (lt, h) in [(LayerType::Gru, 8), (LayerType::Gru, 40), (LayerType::Lstm, 40), (LayerType::Gru, 80), (LayerType::Lstm, 80)] {
-        cases.push((format!("{}_{}_1", lt.to_string().to_uppercase(), h), model_json(lt, h, 1, json!({}), 42)));
-    }
-
-    println!("\n{:<24} {:>14} {:>10} {:>16} {:>10}", "model", "candle smp/s", "x RT", "scalar smp/s", "x RT");
-    for (name, json) in cases {
-        let mut model = custom_model_creator(&json.to_string()).unwrap();
-        let mut buf = signal.clone();
-        let t = Instant::now();
-        model.process(&mut buf, 0.0, 0.0).unwrap();
-        let candle_sps = sr as f64 / t.elapsed().as_secs_f64();
-
-        let mut reference = RefModel::from_json(&json);
-        let t = Instant::now();
-        let mut acc = 0.0f32;
-        for &s in &signal {
-            acc += reference.forward(&[s]);
-        }
-        let scalar_sps = sr as f64 / t.elapsed().as_secs_f64();
-        assert!(acc.is_finite());
-
-        println!(
-            "{:<24} {:>14.0} {:>10.2} {:>16.0} {:>10.2}",
-            name,
-            candle_sps,
-            candle_sps / sr as f64,
-            scalar_sps,
-            scalar_sps / sr as f64
-        );
-    }
-}
+#[cfg(any(feature = "rtneural", feature = "candle"))]
+mod backend;

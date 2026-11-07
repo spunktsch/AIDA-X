@@ -17,11 +17,17 @@ claxon = "=0.4.3"
 rubato = { version = "=5.0.1", default-features = false, features = ["fft_resampler"] }
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
+aidadx_rtneural = { path = "../aidadx_rtneural", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
-default = []
+default = ["rtneural"]
 simd = ["rustfft"]
+# Real-time neural inference through the vendored C++ RTNeural (needs a C++17
+# compiler and the `modules/rtneural` submodule). Used by `DynamicModel` when enabled.
+rtneural = ["dep:aidadx_rtneural"]
+# Candle inference (offline/CLI only, ~1x realtime). `DynamicModel` uses it only
+# when `rtneural` is disabled; `model::inference::ModelInference` is always available.
 candle = ["candle-core", "candle-nn"]
