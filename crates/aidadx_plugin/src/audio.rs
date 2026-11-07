@@ -25,7 +25,7 @@ use aidadx_core::convolver::TwoStageConvolver;
 use aidadx_core::model::DynamicModel;
 use nih_plug::prelude::AtomicF32;
 
-use crate::handoff::Handoff;
+use aidadx_core::handoff::Handoff;
 use crate::parameters::{EqPosition, MidType, ParamSnapshot};
 
 // The C++ constants are `float`s handed to `double` APIs, so they are rounded through
