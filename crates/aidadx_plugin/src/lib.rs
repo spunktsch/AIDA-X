@@ -11,31 +11,61 @@ pub mod audio;
 pub mod parameters;
 pub mod plugin_info;
 
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
 
 pub use audio::{AidaEngine, PluginOutputs};
-pub use parameters::{AidaParams, ParamSnapshot};
+pub use parameters::{AidaParams, ParamIdScheme, ParamSnapshot};
 
-pub struct AidaX {
+/// Selects the DPF host-ID layout an exported plugin type reproduces.
+///
+/// nih-plug hashes the same string parameter ID identically for CLAP and VST3, but DPF's
+/// CLAP and VST3 IDs differ by two (VST3 has two internal parameters first), so each format
+/// gets its own plugin type with its own string IDs (see [`parameters`]).
+pub trait HostFormat: 'static + Send + Sync {
+    const PARAM_ID_SCHEME: ParamIdScheme;
+}
+
+/// Marker for the CLAP export ([`AidaXClap`]).
+pub struct ClapFormat;
+/// Marker for the VST3 export ([`AidaXVst3`]).
+pub struct Vst3Format;
+
+impl HostFormat for ClapFormat {
+    const PARAM_ID_SCHEME: ParamIdScheme = ParamIdScheme::Clap;
+}
+impl HostFormat for Vst3Format {
+    const PARAM_ID_SCHEME: ParamIdScheme = ParamIdScheme::Vst3;
+}
+
+/// The plugin, generic only over which DPF parameter-ID layout it reproduces.
+pub struct AidaX<F: HostFormat> {
     params: Arc<AidaParams>,
     outputs: Arc<PluginOutputs>,
     engine: AidaEngine,
+    _format: PhantomData<fn() -> F>,
 }
 
-impl Default for AidaX {
+/// The type exported through `clap_entry`.
+pub type AidaXClap = AidaX<ClapFormat>;
+/// The type exported through `GetPluginFactory`.
+pub type AidaXVst3 = AidaX<Vst3Format>;
+
+impl<F: HostFormat> Default for AidaX<F> {
     fn default() -> Self {
         Self {
-            params: Arc::new(AidaParams::default()),
+            params: Arc::new(AidaParams::new(F::PARAM_ID_SCHEME)),
             outputs: Arc::new(PluginOutputs::default()),
             engine: AidaEngine::new(),
+            _format: PhantomData,
         }
     }
 }
 
-impl AidaX {
+impl<F: HostFormat> AidaX<F> {
     /// Values DPF exposed as output parameters (model input size, meters).
     pub fn outputs(&self) -> Arc<PluginOutputs> {
         self.outputs.clone()
@@ -67,7 +97,7 @@ impl AidaX {
     }
 }
 
-impl Plugin for AidaX {
+impl<F: HostFormat> Plugin for AidaX<F> {
     const NAME: &'static str = plugin_info::PLUGIN_NAME;
     const VENDOR: &'static str = plugin_info::PLUGIN_BRAND;
     const URL: &'static str = plugin_info::PLUGIN_HOMEPAGE;
@@ -97,6 +127,13 @@ impl Plugin for AidaX {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    /// Accept nih-plug states from earlier Rust builds, which keyed parameters by the bare
+    /// DPF symbol. (DPF's own state blob is not JSON and never reaches this point, see
+    /// TICKET-020 findings.)
+    fn filter_state(state: &mut PluginState) {
+        parameters::migrate_symbol_keys(&mut state.params, F::PARAM_ID_SCHEME);
     }
 
     /// `sampleRateChanged()` + `bufferSizeChanged()`. Also called by nih-plug after a
@@ -146,7 +183,7 @@ impl Plugin for AidaX {
     }
 }
 
-impl ClapPlugin for AidaX {
+impl ClapPlugin for AidaXClap {
     const CLAP_ID: &'static str = plugin_info::CLAP_ID;
     const CLAP_DESCRIPTION: Option<&'static str> = Some(plugin_info::PLUGIN_DESCRIPTION);
     const CLAP_MANUAL_URL: Option<&'static str> = Some(plugin_info::PLUGIN_HOMEPAGE);
@@ -160,7 +197,7 @@ impl ClapPlugin for AidaX {
 }
 
 #[cfg(feature = "vst3")]
-impl Vst3Plugin for AidaX {
+impl Vst3Plugin for AidaXVst3 {
     const VST3_CLASS_ID: [u8; 16] = plugin_info::VST3_CLASS_ID;
     // DISTRHO_PLUGIN_VST3_CATEGORIES "Fx|Dynamics|Mono"
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
@@ -171,15 +208,15 @@ impl Vst3Plugin for AidaX {
 }
 
 #[cfg(feature = "clap")]
-nih_export_clap!(AidaX);
+nih_export_clap!(AidaXClap);
 
 /// Scoped so the allow only covers the upstream `vst3-com` vtable macro, which trips this
 /// future-incompatibility lint. `#[no_mangle]` exports still reach the DLL from here.
 #[cfg(feature = "vst3")]
 #[allow(semicolon_in_expressions_from_non_local_macros)]
 mod vst3_export {
-    use super::AidaX;
+    use super::AidaXVst3;
     use nih_plug::nih_export_vst3;
 
-    nih_export_vst3!(AidaX);
+    nih_export_vst3!(AidaXVst3);
 }
